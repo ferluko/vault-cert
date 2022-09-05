@@ -15,7 +15,7 @@ Desde el punto de vista de infraestructura y seguridad informatica, este enfoque
 
 El propósito de una autoridad de certificación (CA) es validar y emitir certificados. Una CA puede ser una entidad u organización de terceros que ejecuta su propio proveedor para emitir certificados digitales.
 
-Una CA intermedia es una CA firmada por una CA superior (por ejemplo, una CA raíz u otra CA intermedia) y firma otras CA (por ejemplo, otra CA intermedia o subordinada).
+Una CA intermedia es una CA firmada por una CA superior (por ejemplo, una root CA u otra CA intermedia) y firma otras CA (por ejemplo, otra CA intermedia o subordinada).
 
 Si existe una CA intermedia, se coloca en medio de una cadena de confianza entre el Root CA y el certificado del suscriptor que emite las CA subordinadas. Entonces, ¿no usar una Root CA directamente?
 
@@ -146,6 +146,171 @@ subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always,issuer:always
 EOF
 ```
+Generar el certificado:
+
+```sh
+
+openssl req -x509 -new -nodes -key ca.key -sha256 -days 1024 -out ca.crt -extensions v3_ca -config openssl.cnf
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+What you are about to enter is what is called a Distinguished Name or a DN.
+There are quite a few fields but you can leave some blank
+For some fields there will be a default value,
+If you enter '.', the field will be left blank.
+-----
+
+Country Name [CH]:
+
+State or Province Name [ZH]:
+
+Locality Name [Zurich]:
+
+Organization Name [Red Hat]:
+
+Company Name [company.io]:
+
+```
+
+Como se muestra en el resultado anterior, el valor definido en el archivo de configuración openssl.cnf incluye una entrada req_distinguished_name que se utiliza como conjunto de valores predeterminado al generar el certificado. Se pueden utilizar los valores predeterminados o se puede proporcionar un conjunto de valores definido por el usuario.    
+
+Ahora con la root CA, podemos comenzar con el segundo paso de la cadena: la CA intermedia a nivel del cluster.
+
+Generamos la clave privada de CA intermedia:
+
+```sh
+cd  ../intermediate 
+
+openssl  genrsa  -out  ca.key  2048
+```
+
+Generamos el CSR correspondiente.
+
+```sh
+openssl req -new -sha256 -key ca.key -out ca.csr
+
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+What you are about to enter is what is called a Distinguished Name or a DN.
+There are quite a few fields but you can leave some blank
+For some fields there will be a default value,
+If you enter '.', the field will be left blank.
+
+-----
+Country Name (2 letter code) []:CH
+State or Province Name (full name) []:ZH
+Locality Name (eg, city) []:Zurich
+Organization Name (eg, company) []:Red Hat
+Organizational Unit Name (eg, section) []:RH
+Common Name (eg, fully qualified host name) []:int.company.io
+Email Address []:
+Please enter the following 'extra' attributes
+to be sent with your certificate request
+A challenge password []:
+```
+
+Asegúrese de que el Country Name y el Common Name estén definidos, ya que la política ( policy_strict ) establecida en openssl.cnf requiere un Country Name y Common Name coincidente.
+
+Creamos el certificado intermedio.
+
+```sh
+
+openssl ca -config ../root/openssl.cnf -extensions v3_intermediate_ca -days 365 -notext -md sha256 -in ca.csr -out ca.crt
+
+...
+
+Certificate is to be certified until May 12 12:52:52 2023 GMT (365 days)
+
+Sign the certificate? [y/n]:y
+1 out of 1 certificate requests certified, commit? [y/n]y
+
+Write out database with 1 new entries
+Data Base Updated
+```
+
+Nuestra CA intermedia a nivel del cluster ya está lista para ser utilizada.
+#
+## Issuer con Cert Manager
+Lo primero que deberá configurar después de haber instalado cert-manager es que se cree un issuer que luego se puede usar para emitir certificados.
+
+Los issuers son recursos de Kubernetes que representan a las autoridades de certificación (CA) que pueden generar certificados firmados al cumplir con las solicitudes de firma de certificados.
+
+El tipo de issuer más simple es la CA, que hace referencia al secreto TLS de Kubernetes que contiene un certificate-key pair.
+
+Genere certificados SSL para Vault usando Cert Manager.
+Antes de poder instalar Vault, los certificados deben aprovisionarse dentro de un namespaces creado desde cero.
+
+Primero, defina namespace donde queremos instalar Vault:
+
+```sh
+oc new-project hashicorp
+```
+
+Desde el directorio intermediate, creemos el secreto de Kubernetes que contiene el certificado generado anteriormente
+
+```sh
+oc create secret tls intermediate --cert=${CERT_ROOT}/intermediate/ca.crt --key=${CERT_ROOT}/intermediate/ca.key -n hashicorp
+```
+
+Una vez que se crea el secreto, podemos aplicar un issuer CR de Cert Manager de tipo CA al clúster:
+
+```sh
+cat <<EOF | oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: int-ca-issuer
+spec:
+  ca:
+    secretName: intermediate
+EOF
+```
+
+Verifiquemos el estado del issuer para confirmar que se creó correctamente:
+
+```sh
+oc  obtener  emisor  int-ca-emisor 
+
+NOMBRE           LISTO      EDAD 
+
+int-ca-emisor  Verdadero       5s
+```
+
+> NOTA: Este issuer de Cert Manager específico, contiene la autoridad de certificación intermedia que se usa estrictamente para firmar el certificado de Vault únicamente. Ninguna otra aplicación solicitará certificados.
+
+Ahora crearemos un Certificado CR para HashiCorp Vault, pero, primero debemos definir algunas variables que utlizaremos durante todo el proceso:
+
+```sh
+export BASE_DOMAIN=$(oc get dns cluster -o jsonpath='{.spec.baseDomain}')
+export VAULT_HELM_RELEASE=vault
+export VAULT_ROUTE=${VAULT_HELM_RELEASE}.apps.$BASE_DOMAIN
+export VAULT_ADDR=https://${VAULT_ROUTE}
+export VAULT_SERVICE=${VAULT_HELM_RELEASE}-active.hashicorp.svc
+```
+
+Implementamos el certificado:
+
+```sh
+cat <<EOF|oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-certs
+spec:
+  secretName: vault-certs
+  issuerRef:
+    name: int-ca-issuer
+    kind: Issuer
+  dnsNames: 
+  - ${VAULT_ROUTE}
+  # Service Active FQDN
+  - ${VAULT_SERVICE}
+  organization:
+  - company.io
+EOF
+```
+
+
+
 
 
 [//]: # (links references)
