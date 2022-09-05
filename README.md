@@ -56,7 +56,7 @@ Comencemos desde cero y simulemos la creación de nuestra propia autoridad de ce
 
 Vamos a crear el root CA certificate-key pair utilizando el programa OpenSSL.
 
-[![N|Solid](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/root-ca.png)]
+[![](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/root-ca.png)]
 
 Primero, nos dirigimos a un directorio para el cual se crearán los certificados.
 Alli definiremos esa ruta como una variable de entorno que reutilizaremos luego.
@@ -309,10 +309,196 @@ spec:
 EOF
 ```
 
+> NOTA : El certificado generado debe ser válido tanto para el servicio activo de Vault como para Vault Route.
+
+Una vez que cert-manager detecta la creación del Certificado CR, se generará un certificado SSL en nombre de la autoridad de certificación intermedia interna y se guardará como un secreto TLS de Kubernetes. 
+
+```sh
+oc get secret vault-certs
+
+NAME        TYPE              DATA  AGE
+
+vault-certs kubernetes.io/tls 3     12s
+```
+
+> NOTA : Los pods de HashiCorp utilizarán este certificado para proteger el puerto 8200 de la API de Vault. Cuando los nodos de Vault se unan al clúster, deberán realizar una API request al nodo activo de Vault (a través del servicio activo de Vault). Sin embargo, más adelante, cuando se configure el clúster de Vault, los nodos se comunicarán a través del puerto de clúster 8201, que está protegido por un certificado generado internamente por el nodo activo de Vault.
+
+#
+## HashiCorp Vault
+
+[HashiCorp Vault] es un sistema de gestión de cifrado y secretos basado en la identidad.
+
+Un secreto es cualquier cosa a la que desee controlar estrictamente el acceso, como claves de cifrado API, contraseñas o certificados.
+
+Vault proporciona servicios de encriptación controlados por métodos de autenticación y autorización. Con la interfaz de usuario, la CLI o la API HTTP de Vault, el acceso a secretos y otros datos confidenciales se puede almacenar y gestionar de forma segura, controlar de forma estricta (restringir) y auditar.
+
+Con el certificado ahora en marcha, es hora de implementar y configurar Vault.
+
+La forma oficial de instalar Hashicorp Vault es usar el [Vault Helm Chart].
+
+En entornos de producción, se implementa de manera de alta disponibilidad. HashiCorp Vault necesita un backend de almacenamiento subyacente para almacenar los datos y puede confiar en su [almacenamiento integrado] , que utiliza el algoritmo de consenso [RAFT].
+
+Cuando se implementa en OpenShift, el almacenamiento integrado es una solución conveniente para almacenar datos, ya que elimina la carga de administrar un componente de almacenamiento adicional para almacenar los datos de Vault.
+
+1. Cree un directorio de trabajo para la instalación de Vault.
+
+```sh
+mkdir  -p  vault 
+cd  vault/
+```
+
+2. Configure el repositorio de Helm:
+
+```sh
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm repo update
+```
+
+3. Defina el archivo Helmvalues.yaml que configurará un entorno de Vault de alta disponibilidad con almacenamiento Raft:
+
+```sh
+cat <<EOF > values.yaml
+global:
+  tlsDisable: false
+  openshift: true
+injector:
+  image:
+    repository: "registry.connect.redhat.com/hashicorp/vault-k8s"
+    tag: "0.14.2-ubi"
+  agentImage:
+    repository: "registry.connect.redhat.com/hashicorp/vault"
+    tag: "1.9.6-ubi"
+ui:
+  enabled: true
+server:
+  image:
+    repository: "registry.connect.redhat.com/hashicorp/vault"
+    tag: "1.9.6-ubi"
+  route:
+    enabled: true
+    host:
+  extraEnvironmentVars:
+    VAULT_CACERT: "/etc/vault-tls/vault-certs/ca.crt"
+    VAULT_TLS_SERVER_NAME:
+  standalone:
+    enabled: false
+  auditStorage:
+    enabled: true
+    size: 15Gi
+  extraVolumes:
+    - type: "secret"
+      name: "vault-certs"
+      path: "/etc/vault-tls"
+  ha:
+    enabled: true
+    raft:
+      enabled: true
+      setNodeId: true
+      config: |
+        ui = true
+        listener "tcp" {
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_cert_file = "/etc/vault-tls/vault-certs/tls.crt"
+          tls_key_file = "/etc/vault-tls/vault-certs/tls.key"
+          tls_client_ca_file = "/etc/vault-tls/vault-certs/ca.crt"
+        }
+        storage "raft" {
+          path = "/vault/data"
+          retry_join {
+            leader_api_addr = "https://vault-active.hashicorp.svc:8200"
+            leader_ca_cert_file = "/etc/vault-tls/vault-certs/ca.crt"
+          }
+        }
+        log_level = "debug"
+        service_registration "kubernetes" {}
+  service:
+    enabled: true
+EOF
+```
+
+4. Instale el chart de Helm para Vault usando los valores configurados previamente:
+
+```sh
+helm install vault hashicorp/vault -f values.yaml \
+    --set server.route.host=$VAULT_ROUTE \
+    --set server.extraEnvironmentVars.VAULT_TLS_SERVER_NAME=$VAULT_ROUTE \
+    --wait \
+    -n hashicorp
+```
+5. Inicialice Vault y guarde la clave y el token generados:
+
+```sh
+oc -n hashicorp exec -ti vault-0 -- vault operator init -key-threshold=1 -key-shares=1
+
+Unseal Key 1: somekey
+
+Initial Root Token: s.sometoken
+
+```
+
+6. Quite el sello de todas las instancias de Vault porque inician en estado "sealed"  :
+
+```sh
+oc -n hashicorp exec -ti vault-0 -- vault operator unseal
+
+Unseal Key (will be hidden):
+
+oc -n hashicorp exec -ti vault-1 -- vault operator unseal
+
+Unseal Key (will be hidden):
+
+oc -n hashicorp exec -ti vault-2 -- vault operator unseal
+
+Unseal Key (will be hidden):
+
+```
+
+7. Ahora que Vault esta en estado "unseal", verifique que el almacenamiento [RAFT] tenga un "leader" y dos "follower":
+
+```sh
+oc -n hashicorp rsh vault-0
+
+vault login
+
+Token (will be hidden):
+
+vault operator raft list-peers
+
+vault operator raft list-peers
+Node       Address                        State       Voter
+----       -------                        -----       -----
+vault-0    vault-0.vault-internal:8201    leader      true
+vault-1    vault-1.vault-internal:8201    follower    true
+vault-2    vault-2.vault-internal:8201    follower    true
+```
+
+8. Verifique el acceso desde la interfaz de usuario de Vault. En OpenShift Console, haga clic en Redes → Rutas y haga clic en la ruta de Vault .
+[![](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/vault-ui.png)]
+
+9. Para autenticarse, use el token root generado antes por el comando de inicialización.
+
+
+
+
+
+
+
+
+
+
 
 
 
 
 [//]: # (links references)
 
-[Cert Manager]: <https://cert--manager-io.translate.goog/?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp>
+[Cert Manager]: <https://cert-manager.io/>
+
+[HashiCorp Vault]: <https://www.vaultproject.io/docs/what-is-vault>
+
+[Vault Helm Chart]: <https://github.com/hashicorp/vault-helm>
+
+[almacenamiento integrado]: <https://www.vaultproject.io/docs/concepts/integrated-storage>
+
+[RAFT]: <https://raft.github.io/>
