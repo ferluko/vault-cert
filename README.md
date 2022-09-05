@@ -1,92 +1,153 @@
-# PoC-Vault-CertManager
+# Cómo proteger las aplicaciones nativas de la nube con HashiCorp Vault y Cert Manager
 
-Poc para cliente COMAFI a fin de implementar Hashicorp Vault con CertManager para la administración de certificados e implementar plugin Jenkins que consuma secretos desde Vault.
+Cuando hablamos de seguridad en las organizaciones, generalmente nos referimos a la prevención de la pérdida de datos, o también a la automatización e integración segura de aplicaciones. Para lograr esto, es necesario saber quién está haciendo qué con qué activos, y ahí es donde entra en juego la gestión de identidades, como HashiCorp Vault. El "quién" en la ecuación se vuelve muy importante. 
 
-## Getting started
+Los certificados emitidos correctamente permiten la seguridad de extremo a extremo a través de una cadena de identidades confiable (PKI). Resulta que la emisión de certificado pasa ser una tarea cotidina y repetitida dado que debe acompañar la cedencia del despliegue de aplicacion, es decir, esta gestion debe ser tan ágil como el propio proceso de despligue, por lo tanto se requiere automatización más allá de la gestión de identidades.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Como ocurre con la mayoría de los objetivos de seguridad, suele haber tensión entre el requisito de hacer que las cosas sean seguras y tratar de hacer el trabajo real. El arte aquí es equilibrar los dos requisitos en conflicto, una forma de reducir la carga del desarrollador e infraestructura es automatizar tanto como sea posible.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+En este articulo, se probará cómo se puede usar OpenShift junto con Cert Manager y HashiCorp Vault para lograr un proceso automatizado y reproducible para aumentar la seguridad de las aplicaciones.
 
-## Add your files
+Desde el punto de vista de infraestructura y seguridad informatica, este enfoque automatizado es fácil de usar y también está instrumentado para que sepamos qué está pasando y podamos tomar las medidas adecuadas si falla. 
+#
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+## Autoridad Certificante o Certificate Authority (CA)
 
+El propósito de una autoridad de certificación (CA) es validar y emitir certificados. Una CA puede ser una entidad u organización de terceros que ejecuta su propio proveedor para emitir certificados digitales.
+
+Una CA intermedia es una CA firmada por una CA superior (por ejemplo, una CA raíz u otra CA intermedia) y firma otras CA (por ejemplo, otra CA intermedia o subordinada).
+
+Si existe una CA intermedia, se coloca en medio de una cadena de confianza entre el Root CA y el certificado del suscriptor que emite las CA subordinadas. Entonces, ¿no usar una Root CA directamente?
+
+Por lo general, la Root CA  no firma certificados de servidor o cliente directamente. La Root CA se usa solo para crear una o más CA intermedias. El uso de una CA intermedia es principalmente por motivos de seguridad y la Root CA está alojada en otro lugar, en un lugar seguro; fuera de línea y se usa con la menor frecuencia posible.
+
+Por lo tanto, lo mejor es no exponer la Root CA dentro de los entornos de cliente y, en su lugar, emitir una CA intermedia de vida más corta. El uso de CA intermedia también se alinea con las mejores prácticas de la industria.
+#
+
+## Jerarquía de CA
+
+En grandes organizaciones, lo ideal seria delegar la emision de certificados a distintas autoridades de certificacion para asi tener un control granular apropiado para cada CA.
+
+Por ejemplo,  la cantidad de certificados puede ser demasiado grande para que una sola CA realice un seguimiento efectivo de los certificados que ha emitido;  o cada departamento dentro de la organizacion  puede tener diferentes políticas y reglas, como períodos de validez; o puede ser importante diferenciar los certificados para la comunicación interna o externa.
+
+El estándar X.509 incluye una plantilla para configurar una jerarquía de CA:
+[![N|Solid](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/infografia-jerarquia-ca.png)]
+- Root CA aislada en un servidor offline para firmar una CA intermedia primaria.
+- CA intermedia a nivel del cluster que permite firmar otra CA intermedia para vault en su rol de issuer
+- CA intermedia para Vault en su rol de issuer que emite una ultima CA a nivel granular de cada aplicaion.
+- CA intermedia a nivel de aplicacion  que permite la firma de certificados que seran consumidos por las aplicaciones.
+- Certificado disponibilizado para las aplicaciones.
+
+#
+
+# Instalación
+## Administrador de certificados
+El operador [Cert Manager] provisto por JetStack es una herramienta para Kubernetes y Openshift que automatiza la gestión de certificados en entornos nativos de la nube.
+
+Se basa en estas plataformas para proporcionar certificados X.509 y emisores como tipos de recursos de primera clase.
+Proporciona herramientas fáciles de usar para administrar certificados, incluidos "certificados como servicio" para habilitar de forma segura a los desarrolladores y aplicaciones que trabajan dentro de un clúster y una API estandarizada para interactuar con múltiples autoridades de certificación (CA). Esto brinda a los equipos de seguridad la confianza para permitir que los desarrolladores administren los certificados en forma de autoservicio.
+
+[Cert Manager] integra una variedad de Emisores, tanto Emisores públicos populares como Emisores privados, y se asegurará de que los certificados sean válidos y estén actualizados, e intentará renovar los certificados en un momento configurado antes de su vencimiento.
+
+#
+
+## Crear la cadena de CA
+Comencemos desde cero y simulemos la creación de nuestra propia autoridad de certificación y la construcción de la jerarquía de CA.
+
+Vamos a crear el root CA certificate-key pair utilizando el programa OpenSSL.
+
+[![N|Solid](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/root-ca.png)]
+
+Primero, nos dirigimos a un directorio para el cual se crearán los certificados.
+Alli definiremos esa ruta como una variable de entorno que reutilizaremos luego.
+```sh
+export CERT_ROOT=$(pwd)
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager.git
-git branch -M main
-git push -uf origin main
+Defina la estructura del directorio:
+```sh
+mkdir  -p ${CERT_ROOT} /{raíz,intermedio} 
+```
+Genere la CA certificate-key pair:
+```sh
+cd ${CERT_ROOT} /root/ openssl genrsa -out ca.key 2048 touch index.txt echo 1000 > serial mkdir -p newcerts 
 ```
 
-## Integrate with your tools
+Defina el archivo openssl.cnf:
+```sh
+cat <<EOF > openssl.cnf
+[ ca ]
+default_ca = CA_default
 
-- [ ] [Set up project integrations](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/settings/integrations)
+[ CA_default ]
+# Directory and file locations.
+dir               = ${CERT_ROOT}/root
+certs             = \$dir/certs
+crl_dir           = \$dir/crl
+new_certs_dir     = \$dir/newcerts
+database          = \$dir/index.txt
+serial            = \$dir/serial
+RANDFILE          = \$dir/private/.rand
 
-## Collaborate with your team
+# The root key and root certificate.
+private_key       = \$dir/ca.key
+certificate       = \$dir/ca.crt
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+# For certificate revocation lists.
+crlnumber         = \$dir/crlnumber
+crl               = \$dir/crl/ca.crl
+crl_extensions    = crl_ext
+default_crl_days  = 30
 
-## Test and Deploy
+# SHA-1 is deprecated, so use SHA-2 instead.
+default_md        = sha256
 
-Use the built-in continuous integration in GitLab.
+name_opt          = ca_default
+cert_opt          = ca_default
+default_days      = 375
+preserve          = no
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+policy            = policy_strict
 
-***
+[ policy_strict ]
+# The root CA should only sign intermediate certificates that match.
+countryName               = match
+stateOrProvinceName       = optional
+organizationName          = optional
+organizationalUnitName    = optional
+commonName                = supplied
+emailAddress              = optional
 
-# Editing this README
+[ v3_intermediate_ca ]
+# Extensions for a typical intermediate CA.
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true, pathlen:1
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
+[req_distinguished_name]
+countryName = CH
+countryName = Country Name
+countryName_default = CH
+stateOrProvinceName = State or Province Name
+stateOrProvinceName_default = ZH
+localityName= Locality Name
+localityName_default = Zurich
+organizationName= Organization Name
+organizationName_default = Red Hat
+commonName= Company Name
+commonName_default = company.io
+commonName_max = 64
 
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+[req]
+distinguished_name = req_distinguished_name
+[ v3_ca ]
+basicConstraints = critical,CA:TRUE
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer:always
+EOF
+```
 
-## Name
-Choose a self-explaining name for your project.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+[//]: # (links references)
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+[Cert Manager]: <https://cert--manager-io.translate.goog/?_x_tr_sl=auto&_x_tr_tl=es&_x_tr_hl=es&_x_tr_pto=wapp>
