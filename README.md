@@ -31,7 +31,7 @@ En grandes organizaciones, lo ideal seria delegar la emision de certificados a d
 Por ejemplo,  la cantidad de certificados puede ser demasiado grande para que una sola CA realice un seguimiento efectivo de los certificados que ha emitido;  o cada departamento dentro de la organizacion  puede tener diferentes políticas y reglas, como períodos de validez; o puede ser importante diferenciar los certificados para la comunicación interna o externa.
 
 El estándar X.509 incluye una plantilla para configurar una jerarquía de CA:
-![CAChain](images/infografia-jerarquia-ca.png)]
+![CAChain](images/infografia-jerarquia-ca.png)
 - Root CA aislada en un servidor offline para firmar una CA intermedia primaria.
 - CA intermedia a nivel del cluster que permite firmar otra CA intermedia para vault en su rol de issuer
 - CA intermedia para Vault en su rol de issuer que emite una ultima CA a nivel granular de cada aplicaion.
@@ -41,6 +41,7 @@ El estándar X.509 incluye una plantilla para configurar una jerarquía de CA:
 #
 
 # Instalación
+
 ## Administrador de certificados
 El operador [Cert Manager] provisto por JetStack es una herramienta para Kubernetes y Openshift que automatiza la gestión de certificados en entornos nativos de la nube.
 
@@ -553,7 +554,8 @@ vault write -tls-skip-verify auth/kubernetes/role/vault-admin bound_service_acco
 ```
 Verifique el método de autenticación de kubernetes creado recientemente desde Vault UI → Access → AuthMethods.
    
-[![vault-authmethods.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/vault-authmethods.png)]
+![vault-authmethods.png](images/vault-authmethods.png)
+
 
 7. Cree un mapa de configuración que contenga nuestra CA intermedia nivel del cluster:
 
@@ -590,7 +592,7 @@ oc patch subscription vault --type=merge --patch-file patch.yaml -n vault
 ```
 El parche de la suscripción actualiza la implementación del operador de configuración de la bóveda con la nueva configuración, como se muestra en la imagen a continuación.
 
-[![patch-suscription.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/patch-suscription.png)]
+![patch-suscription.png](/images/patch-suscription.png)
 
 9. Agregue la función de revisión de tokens para la SA del controller-manager para que lo utilice Vault:
     
@@ -604,7 +606,7 @@ El [Vault PKI Secrets Engine]I genera certificados X.509 dinámicos, sin requeri
 
 Los mecanismos de autenticación y autorización integrados de Vault proporcionan la funcionalidad de verificación necesaria.
 
-[![vault-pki-secret-engine.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/vault-pki-secret-engine.png)]
+![vault-pki-secret-engine.png](/images/vault-pki-secret-engine.png)
 
 Como se ve en el diagrama anterior, hay varios pasos para permitir que Vault sea un administrador de certificados en OpenShift. Estos pasos se detallan a continuación:
 
@@ -634,7 +636,7 @@ Es hora de crear la jerarquía de la cadena de CA con una root CA  fuera de lín
 
 Tener una CA intermedia dedicada por organización o equipo puede aumentar la seguridad y obtener un mayor control sobre la cadena de confianza en su ecosistema, lo que le permite confiar solo en los certificados emitidos por su modelo de confianza.
 
-[![ca-hierarchy.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/ca-hierarchy.png)]
+![ca-hierarchy.png](/images/ca-hierarchy.png)
 
 1. Cree un SecretEngineMount intermedio : 
 ```sh
@@ -642,7 +644,7 @@ Tener una CA intermedia dedicada por organización o equipo puede aumentar la se
 ```
 Verifique desde la interfaz de usuario de Vault → Secretos que creó el motor secreto de PKI.
 
-[![pki-intermediate.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/pki-intermediate.png)]
+![pki-intermediate.png](/images/pki-intermediate.png)
 
 2. Configure un PKISecretEngineConfig intermedio : 
 ```sh
@@ -672,7 +674,7 @@ Waiting spec.externalSignSecret with signed intermediate certificate.
 ```
 > Verifique desde Vault UI → Secret → pki/intermediate el certificado firmado.
 
-[![pki-intermediate-cert-signed.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/pki-intermediate-cert-signed.png)]
+![pki-intermediate-cert-signed.png](/images/pki-intermediate-cert-signed.png)
 
 Configuracion de la PKI para el app namespace:
 
@@ -684,7 +686,7 @@ En este punto, es hora de configurar la PKI para namespace de la aplicación; pa
 ```
 Verifique desde la interfaz de usuario de Vault → Acceso → AuthMethods.
 
-[![auth-methods.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/auth-methods.png)]
+![auth-methods.png](/images/auth-methods.png)
 
 2. Cree "KubernentesAuthEngineConfig" para configurar el montaje del motor de autenticación para que apunte a un extremo de la API maestra de Kubernetes específico: 
      
@@ -698,7 +700,7 @@ Verifique desde la interfaz de usuario de Vault → Acceso → AuthMethods.
 ```
 Verifique desde la interfaz de usuario de Vault → Acceso → app-kubernetes/team-one → Roles.
 
-[![app-role-team-one.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/app-role-team-one.png)]
+![app-role-team-one.png](/images/app-role-team-one.png)
 
 4. Defina la política para otorgar el acceso correcto al motor PKI:
 
@@ -717,9 +719,9 @@ Verifique desde la interfaz de usuario de Vault → Acceso → app-kubernetes/te
 
 Verificar desde la interfaz de usuario de Vault → Secretos 
 
-[![secret-engine.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/secret-engine.png)]
+![secret-engine.png](/images/secret-engine.png)
 
-7. Genere el CA intermedia a nivel de aplicacion firmado por la pki interna de Vault/ CA intermedia:
+1. Genere el CA intermedia a nivel de aplicacion firmado por la pki interna de Vault/ CA intermedia:
 
 ```sh
 
@@ -727,9 +729,9 @@ Verificar desde la interfaz de usuario de Vault → Secretos
 
 Verifique desde Vault UI → Secret → app-pki/team-one el certificado firmado.
 
-[![pki-certificate.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/pki-certificate.png)]
+![pki-certificate.png](/images/pki-certificate.png)
 
-8. Configure el rol de PKI:
+1. Configure el rol de PKI:
 
 
 ```sh
@@ -737,14 +739,14 @@ Verifique desde Vault UI → Secret → app-pki/team-one el certificado firmado.
 ```
 Verifique desde la interfaz de usuario de Vault → Secreto → app-pki/team-one → Roles 
 
-[![app-pki-team-one.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/app-pki-team-one.png)]
+![app-pki-team-one.png](/images/app-pki-team-one.png)
 
 #
 ## Implentacion de aplicacion de muestra
 
 Para demostrar la funcionalidad de un extremo a otro, se puede implementar una aplicación de demostración basada en el web server apache con certificados proporcionados por cert-manager y la integración de Hashicorp Vault.
 
-[![app-demo.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/app-demo.png)]
+![app-demo.png](/images/app-demo.png)
 
 Como podemos ver en el diagrama anterior, hay varios pasos para solicitar certificados de Hashicorp Vault que pueden ser consumidos por las aplicaciones.
 
@@ -767,7 +769,7 @@ Como podemos observar en el ejemplo de código anterior, la autenticación se re
 
 Esto se configura en la interfaz de usuario de Vault → Acceso → Métodos de autenticación → app-kubernetes/team-one → Roles → team-one de la siguiente manera:  
 
-[![auth-role-team-one.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/auth-role-team-one.png)]
+![auth-role-team-one.png](/images/auth-role-team-one.png)
 
 
 
