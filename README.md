@@ -31,7 +31,7 @@ En grandes organizaciones, lo ideal seria delegar la emision de certificados a d
 Por ejemplo,  la cantidad de certificados puede ser demasiado grande para que una sola CA realice un seguimiento efectivo de los certificados que ha emitido;  o cada departamento dentro de la organizacion  puede tener diferentes políticas y reglas, como períodos de validez; o puede ser importante diferenciar los certificados para la comunicación interna o externa.
 
 El estándar X.509 incluye una plantilla para configurar una jerarquía de CA:
-[![N|Solid](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/infografia-jerarquia-ca.png)]
+![CAChain](images/infografia-jerarquia-ca.png)]
 - Root CA aislada en un servidor offline para firmar una CA intermedia primaria.
 - CA intermedia a nivel del cluster que permite firmar otra CA intermedia para vault en su rol de issuer
 - CA intermedia para Vault en su rol de issuer que emite una ultima CA a nivel granular de cada aplicaion.
@@ -56,7 +56,7 @@ Comencemos desde cero y simulemos la creación de nuestra propia autoridad de ce
 
 Vamos a crear el root CA certificate-key pair utilizando el programa OpenSSL.
 
-[![root-ca.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/root-ca.png)]
+![root-ca.png](images/root-ca.png)
 
 Primero, nos dirigimos a un directorio para el cual se crearán los certificados.
 Alli definiremos esa ruta como una variable de entorno que reutilizaremos luego.
@@ -65,7 +65,7 @@ export CERT_ROOT=$(pwd)
 ```
 Defina la estructura del directorio:
 ```sh
-mkdir  -p ${CERT_ROOT} /{raíz,intermedio} 
+mkdir  -p ${CERT_ROOT} /{root,intermediate} 
 ```
 Genere la CA certificate-key pair:
 ```sh
@@ -159,13 +159,13 @@ For some fields there will be a default value,
 If you enter '.', the field will be left blank.
 -----
 
-Country Name [CH]:
+Country Name [AR]:
 
-State or Province Name [ZH]:
+State or Province Name [BA]:
 
-Locality Name [Zurich]:
+Locality Name [CABA]:
 
-Organization Name [Red Hat]:
+Organization Name [Semperti]:
 
 Company Name [company.io]:
 
@@ -196,11 +196,11 @@ For some fields there will be a default value,
 If you enter '.', the field will be left blank.
 
 -----
-Country Name (2 letter code) []:CH
-State or Province Name (full name) []:ZH
-Locality Name (eg, city) []:Zurich
-Organization Name (eg, company) []:Red Hat
-Organizational Unit Name (eg, section) []:RH
+Country Name (2 letter code) []:AR
+State or Province Name (full name) []:BA
+Locality Name (eg, city) []:CABA
+Organization Name (eg, company) []:Semperti
+Organizational Unit Name (eg, section) []:IT
 Common Name (eg, fully qualified host name) []:int.company.io
 Email Address []:
 Please enter the following 'extra' attributes
@@ -270,9 +270,9 @@ Verifiquemos el estado del issuer para confirmar que se creó correctamente:
 ```sh
 oc  obtener  emisor  int-ca-emisor 
 
-NOMBRE           LISTO      EDAD 
+NAME           READY      AGE 
 
-int-ca-emisor  Verdadero       5s
+int-ca-emisor  True       5s
 ```
 
 > NOTA: Este issuer de Cert Manager específico, contiene la autoridad de certificación intermedia que se usa estrictamente para firmar el certificado de Vault únicamente. Ninguna otra aplicación solicitará certificados.
@@ -474,7 +474,7 @@ vault-2    vault-2.vault-internal:8201    follower    true
 ```
 
 8. Verifique el acceso desde la interfaz de usuario de Vault. En OpenShift Console, haga clic en Redes → Rutas y haga clic en la ruta de Vault .
-[![](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/vault-ui.png)]
+[](images/vault-ui.png)
 
 9. Para autenticarse, use el token root generado antes por el comando de inicialización.
 
@@ -525,13 +525,13 @@ EOF
 
 vault policy -tls-skip-verify write vault-admin ./policy.hcl
 ```
-[![vault-admin-policy.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/vault-admin-policy.png)]
+[vault-admin-policy.png](images/vault-admin-policy.png)]
 
 > NOTA: esta política es intencionalmente amplia para permitir probar cualquier accion en Vault. En un escenario productivo, esta política tendría un alcance reducido. 
 
 4. Cree un nuevo proyecto llamado "vault" donde desplegaremos distintas configuraciones:
 ```sh
-oc new-project vault
+oc new-project hashic
 ```
 5. Habilite el método de autenticación de Kubernetes obteniendo primero los detalles relacionados con la API de Kubernetes, incluido el certificado:
    
