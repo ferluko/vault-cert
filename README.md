@@ -56,7 +56,7 @@ Comencemos desde cero y simulemos la creación de nuestra propia autoridad de ce
 
 Vamos a crear el root CA certificate-key pair utilizando el programa OpenSSL.
 
-[![](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/root-ca.png)]
+[![root-ca.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/root-ca.png)]
 
 Primero, nos dirigimos a un directorio para el cual se crearán los certificados.
 Alli definiremos esa ruta como una variable de entorno que reutilizaremos luego.
@@ -478,14 +478,296 @@ vault-2    vault-2.vault-internal:8201    follower    true
 
 9. Para autenticarse, use el token root generado antes por el comando de inicialización.
 
+#
+## Integrar Vault con OpenShift
 
 
+En este punto, Vault está listo para integrarse en la plataforma OpenShift.
+
+### Método de autenticación de Kubernetes
+
+El método de autenticación de Kubernetes se puede usar para autenticarse con Vault mediante un Service Account (SA) token de Kubernetes. El token de la SA de un pod se monta automáticamente dentro de un pod en /var/run/secrets/kubernetes.io/serviceaccount/token y se envía a Vault para su autenticación.    
+
+Vault, como todos los pods en Kubernetes, está configurado con una cuenta de servicio que tiene permisos para acceder a la API TokenReview . Esta SA se puede usar para realizar request  autenticadas a Kubernetes para verificar los tokens de las 
+SA de los pods que desean conectarse a Vault para obtener secretos.  
+
+### Configuración de Vault para OpenShift
+
+#### Conectando Vault
+
+La conexión a Vault se puede inicializar con [las variables de entorno estándar de Vault] que se aplican al pod de operador de configuración de Vault. Consulte la [documentación de OLM] sobre cómo pasar variables de entorno a través de una suscripción. Las variables que se leen en la inicialización del cliente se enumeran [aquí] .  
+
+1. Descargue e instale el [cliente de Vault] siguiendo las instrucciones.
+
+En el siguiente ejemplo se enumeran los comandos para instalarlo en ambientes Linux RHEL/Centos
+```sh
+sudo yum install -y yum-utils
+sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
+sudo yum -y install vault
+```
+2. Inicie sesión en Vault con la contraseña raíz que se mostró anteriormente al inicializar Vault:
+
+```sh
+vault login -tls-skip-verify
+
+Token (will be hidden):
+
+Success! You are now authenticated.
+```
+3. Cree una [política de administrador]: 
+
+```sh
+cat <<EOF > ./policy.hcl
+path "/*" {
+  capabilities = ["create", "read", "update", "delete", "list","sudo"]
+}
+EOF
+
+vault policy -tls-skip-verify write vault-admin ./policy.hcl
+```
+[![vault-admin-policy.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/vault-admin-policy.png)]
+
+> NOTA: esta política es intencionalmente amplia para permitir probar cualquier accion en Vault. En un escenario productivo, esta política tendría un alcance reducido. 
+
+4. Cree un nuevo proyecto llamado "vault" donde desplegaremos distintas configuraciones:
+```sh
+oc new-project vault
+```
+5. Habilite el método de autenticación de Kubernetes obteniendo primero los detalles relacionados con la API de Kubernetes, incluido el certificado:
+   
+```sh
+JWT_SECRET=$(oc get sa controller-manager -o jsonpath='{.secrets}' | jq '.\[] | select(.name|test("token-")).name')
+JWT=$(oc sa get-token controller-manager)
+KUBERNETES_HOST=https://kubernetes.default.svc:443
+
+oc extract configmap/kube-root-ca.crt -n vault
+
+vault auth enable -tls-skip-verify kubernetes
+
+vault write -tls-skip-verify auth/kubernetes/config token_reviewer_jwt=$JWT kubernetes_host=$KUBERNETES_HOST kubernetes_ca_cert=@./ca.crt
+```
+6. Crear un Rol y asignarlo a la política previamente creada
+   
+```sh
+vault write -tls-skip-verify auth/kubernetes/role/vault-admin bound_service_account_names=controller-manager bound_service_account_namespaces=vault policies=vault-admin ttl=1h
+```
+Verifique el método de autenticación de kubernetes creado recientemente desde Vault UI → Access → AuthMethods.
+   
+[![vault-authmethods.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/vault-authmethods.png)]
+
+7. Cree un mapa de configuración que contenga nuestra CA intermedia nivel del cluster:
+
+```sh
+oc create configmap int-ca --from-file=${CERT_ROOT}/intermediate/ca.crt -n vault
+```
+8. Parche la suscripción para incluir la conexión a nuestra instancia de Vault:
+   
+```sh
+cat <<EOF > patch.yaml
+spec:
+  config:
+    env:
+    - name: VAULT_ADDR
+      value: https://vault-active.hashicorp.svc:8200
+    - name: VAULT_CACERT
+      value: /vault-ca/ca.crt
+    - name: VAULT_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: $JWT_SECRET
+          key: token
+    volumes:
+    - name: vault-ca
+      configMap:
+        name: int-ca
+    volumeMounts:
+    - mountPath: /vault-ca
+      name: vault-ca
+EOF
 
 
+oc patch subscription vault --type=merge --patch-file patch.yaml -n vault
+```
+El parche de la suscripción actualiza la implementación del operador de configuración de la bóveda con la nueva configuración, como se muestra en la imagen a continuación.
+
+[![patch-suscription.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/patch-suscription.png)]
+
+9. Agregue la función de revisión de tokens para la SA del controller-manager para que lo utilice Vault:
+    
+```sh
+oc adm policy add-cluster-role-to-user system:auth-delegator -z controller-manager
+```
+#
+## Vault PKI Secrets Engine.
+
+El [Vault PKI Secrets Engine]I genera certificados X.509 dinámicos, sin requerir todas las acciones manuales.  
+
+Los mecanismos de autenticación y autorización integrados de Vault proporcionan la funcionalidad de verificación necesaria.
+
+[![vault-pki-secret-engine.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/vault-pki-secret-engine.png)]
+
+Como se ve en el diagrama anterior, hay varios pasos para permitir que Vault sea un administrador de certificados en OpenShift. Estos pasos se detallan a continuación:
+
+Vault:
+
+1. Habilite el [Vault PKI Secrets Engine] en Vault.
+
+2. Autorice Vault SA en k8s para la revisión de tokens.
+
+3. Habilite [Vault PKI Secrets Engine].
+
+4. Configure el rol de PKI en Vault.
+
+5. Configure la política de PKI en Vault.
+
+6. Autorizar/Obligar al emisor SA a usar (política) el rol de PKI.
+
+Cert-Manager:
+1. Cree el issuer en el namespace de la aplicación con issuer SA.
+
+2. [Cert Manager] valida las credenciales del emisor contra Vault.
 
 
+Jerarquia CA:
+
+Es hora de crear la jerarquía de la cadena de CA con una root CA  fuera de línea y CA intermedia para Vault para cada namespaces de cada aplicación.
+
+Tener una CA intermedia dedicada por organización o equipo puede aumentar la seguridad y obtener un mayor control sobre la cadena de confianza en su ecosistema, lo que le permite confiar solo en los certificados emitidos por su modelo de confianza.
+
+[![ca-hierarchy.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/ca-hierarchy.png)]
+
+1. Cree un SecretEngineMount intermedio : 
+```sh
+
+```
+Verifique desde la interfaz de usuario de Vault → Secretos que creó el motor secreto de PKI.
+
+[![pki-intermediate.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/pki-intermediate.png)]
+
+2. Configure un PKISecretEngineConfig intermedio : 
+```sh
+
+```
+
+> Nota: PKISecretEngineConfig permanece en estado de error hasta que se proporciona el certificado firmado.
+ ```sh
+Waiting spec.externalSignSecret with signed intermediate certificate.
+```
+
+3. Firme el CSR con la CA raíz de la empresa:
+
+```sh
+
+```
+4. Cree el secreto con el certificado intermedio firmado:
+
+```sh
+
+```
+
+5. Parche el PKISecretEngineConfig con el nuevo secreto intermedio firmado.  
+
+```sh
+
+```
+> Verifique desde Vault UI → Secret → pki/intermediate el certificado firmado.
+
+[![pki-intermediate-cert-signed.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/pki-intermediate-cert-signed.png)]
+
+Configuracion de la PKI para el app namespace:
+
+En este punto, es hora de configurar la PKI para namespace de la aplicación; para este ejemplo, configuramos el namespace team-one.  
+
+1. Cree "AuthEngineMount" para definir un [authentication engine endpoint]:
+```sh
+
+```
+Verifique desde la interfaz de usuario de Vault → Acceso → AuthMethods.
+
+[![auth-methods.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/auth-methods.png)]
+
+2. Cree "KubernentesAuthEngineConfig" para configurar el montaje del motor de autenticación para que apunte a un extremo de la API maestra de Kubernetes específico: 
+     
+```sh
+
+```
+3. Cree KubernetesAuthEngineRole , que configura todas las SA predeterminadas en el namespace de la aplicación:
+
+```sh
+
+```
+Verifique desde la interfaz de usuario de Vault → Acceso → app-kubernetes/team-one → Roles.
+
+[![app-role-team-one.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/app-role-team-one.png)]
+
+4. Defina la política para otorgar el acceso correcto al motor PKI:
+
+```sh
+
+```
+5. Ahora, cree el namespace de la aplicación team-one que puede aprovechar los recursos que configuramos anteriormente:  
+```sh
+
+```
+6. Cree el "SecretEngineMount" de tipo PKI en el namespace de la aplicación team-one :
+
+```sh
+
+```
+
+Verificar desde la interfaz de usuario de Vault → Secretos 
+
+[![secret-engine.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/secret-engine.png)]
+
+7. Genere el CA intermedia a nivel de aplicacion firmado por la pki interna de Vault/ CA intermedia:
+
+```sh
+
+```
+
+Verifique desde Vault UI → Secret → app-pki/team-one el certificado firmado.
+
+[![pki-certificate.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/pki-certificate.png)]
+
+8. Configure el rol de PKI:
 
 
+```sh
+
+```
+Verifique desde la interfaz de usuario de Vault → Secreto → app-pki/team-one → Roles 
+
+[![app-pki-team-one.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/app-pki-team-one.png)]
+
+#
+## Implentacion de aplicacion de muestra
+
+Para demostrar la funcionalidad de un extremo a otro, se puede implementar una aplicación de demostración basada en el web server apache con certificados proporcionados por cert-manager y la integración de Hashicorp Vault.
+
+[![app-demo.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/app-demo.png)]
+
+Como podemos ver en el diagrama anterior, hay varios pasos para solicitar certificados de Hashicorp Vault que pueden ser consumidos por las aplicaciones.
+
+**En OpenShift:**
+
+El issuer de cert-manager es la interfaz entre los certificados y HashiCorp Vault. Definimos la ruta donde se crearán los certificados y la autenticación de Kubernetes para acceder al rol de "team-one" de PKI.
+
+Vamos a crear un issuer a nivel del namespace, que es la mejor forma de aislar certificados. 
+Por lo tanto, no es posible emitir certificados desde un issuer en un namespace diferente:
+
+1.1 Obtenga HashiCorp Vault CA Bundle y el token de SA predeterminado de team-one.
+```sh
+
+```
+1.2 Crear issuer de cert-manager.
+```sh
+
+```
+Como podemos observar en el ejemplo de código anterior, la autenticación se realiza mediante la SA predeterminada del namespace.
+
+Esto se configura en la interfaz de usuario de Vault → Acceso → Métodos de autenticación → app-kubernetes/team-one → Roles → team-one de la siguiente manera:  
+
+[![auth-role-team-one.png](https://gitlab.com/semperti-clientes/comafi/poc-vault-certmanager/-/blob/main/images/auth-role-team-one.png)]
 
 
 
@@ -502,3 +784,17 @@ vault-2    vault-2.vault-internal:8201    follower    true
 [almacenamiento integrado]: <https://www.vaultproject.io/docs/concepts/integrated-storage>
 
 [RAFT]: <https://raft.github.io/>
+
+[las variables de entorno estándar de Vault]:<https://www.vaultproject.io/docs/commands#environment-variables>
+
+[documentación de OLM]:<https://github.com/operator-framework/operator-lifecycle-manager/blob/master/doc/design/subscription-config.md#env>
+
+[aquí]:<https://github.com/hashicorp/vault/blob/14101f866414d2ed7850648b465c746ac8fda621/api/client.go#L35>
+
+[cliente de Vault]:<https://www.vaultproject.io/downloads>
+
+[política de administrador]:<https://www.vaultproject.io/docs/concepts/policies>
+
+[Vault PKI Secrets Engine]:<https://www.vaultproject.io/api-docs/secret/pki>
+
+[authentication engine endpoint]:<https://www.vaultproject.io/docs/auth>
