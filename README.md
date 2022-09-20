@@ -669,50 +669,22 @@ Configuracion de la PKI para el app demo:
 
 En este punto, es hora de configurar la PKI para namespace de la aplicación demo; para este ejemplo, configuramos el namespace team-one.  
 
-1. Cree "AuthEngineMount" para definir un [authentication engine endpoint]:
+1. Crear el secret engine de tipo PKI para el proyecto:
 ```sh
 
-```
-Verifique desde la interfaz de usuario de Vault → Acceso → AuthMethods.
-
-![auth-methods.png](/images/auth-methods.png)
-
-2. Cree "KubernentesAuthEngineConfig" para configurar el montaje del motor de autenticación para que apunte a un extremo de la API maestra de Kubernetes específico: 
-     
-```sh
+mkdir ~/poc/vault/pki-openshift && cd ~/poc/vault/pki-openshift
+ 
+vault secrets enable -path=pki/openshift -max-lease-ttl=8760h pki
 
 ```
-3. Cree KubernetesAuthEngineRole , que configura todas las SA predeterminadas en el namespace de la aplicación:
-
-```sh
-
-```
-Verifique desde la interfaz de usuario de Vault → Acceso → app-kubernetes/team-one → Roles.
-
-![app-role-team-one.png](/images/app-role-team-one.png)
-
-4. Defina la política para otorgar el acceso correcto al motor PKI:
-
-```sh
-
-```
-5. Ahora, cree el namespace de la aplicación team-one que puede aprovechar los recursos que configuramos anteriormente:  
-```sh
-
-```
-6. Cree el "SecretEngineMount" de tipo PKI en el namespace de la aplicación team-one :
-
-```sh
-
-```
-
-Verificar desde la interfaz de usuario de Vault → Secretos 
+Verifique desde la interfaz de usuario de Vault → Secrets .
 
 ![secret-engine.png](/images/secret-engine.png)
 
-1. Genere el CA intermedia a nivel de aplicacion firmado por la pki interna de Vault/ CA intermedia:
+1. Genere el CA intermedia a nivel de aplicacion firmado por la pki interna de Vault/ CA Intermediate:
 
 ```sh
+
 
 ```
 
@@ -720,15 +692,43 @@ Verifique desde Vault UI → Secret → app-pki/team-one el certificado firmado.
 
 ![pki-certificate.png](/images/pki-certificate.png)
 
-1. Configure el rol de PKI:
-
+1. Configure y cree el rol de PKI:
 
 ```sh
+vault write pki/openshift/roles/sandbox971-opentlc-com allowed_domains="*.vault.int.company.io"  allowed_domains="*.svc"  allowed_domains="*.apps.${BASE_DOMAIN}" allow_subdomains=true allowed_other_sans="*" allowed_uri_sans="*.apps.${BASE_DOMAIN}" max_ttl=8760h 
+
+vault write pki/openshift/config/urls issuing_certificates="https://${VAULT_ROUTE}/v1/pki/openshift/ca" crl_distribution_points="https://${VAULT_ROUTE}/v1/pki/openshift/crl"
+
 
 ```
-Verifique desde la interfaz de usuario de Vault → Secreto → app-pki/team-one → Roles 
+>NOTA: El nombre del roles en el ejemplo anterior se llama **sandbox971-opentlc-com**
+
+Verifique desde la interfaz de usuario de Vault → Secreto → pki/openshift → Roles 
 
 ![app-pki-team-one.png](/images/app-pki-team-one.png)
+
+2. Genere el CSR y lealo.
+
+```
+vault write -field=csr pki/openshift/intermediate/generate/internal common_name="apps.${BASE_DOMAIN}" ttl=4760h >> pki_openshift.csr
+
+openssl req -in pki_openshift.csr -noout -text
+```
+
+3. Firme el CSR generado en el paso anterior generando el CRT de esta CA Intermedia.
+
+```
+
+vault write -field=certificate pki/intermediate/root/sign-intermediate csr=@pki_openshift.csr format=pem_bundle ttl=4760h >> signed_certificate_pki_openshift.pem
+
+openssl x509 -in signed_certificate_pki_openshift.pem -text -noout
+
+```
+
+4. Suba el CRT firmado
+```
+vault write pki/openshift/intermediate/set-signed certificate=@signed_certificate_pki_openshift.pem
+```
 
 #
 ## Implentacion de aplicacion Demo
@@ -746,21 +746,103 @@ El issuer de cert-manager es la interfaz entre los certificados y HashiCorp Vaul
 Vamos a crear un issuer a nivel del namespace, que es la mejor forma de aislar certificados. 
 Por lo tanto, no es posible emitir certificados desde un issuer en un namespace diferente:
 
-1.1 Obtenga HashiCorp Vault CA Bundle y el token de SA predeterminado de team-one.
+1. Crear issuer de cert-manager.
 ```sh
+export CERT_MANAGER_ISSUER_TOKEN=$(oc describe sa vault-auth -n openshift-cert-manager | grep 'Tokens:' | awk '{print $2}')
+export VAULT_LISTENER_CERT=$(oc get secret vault-certs -n hashicorp -o json | jq -r '.data."ca.crt"')
 
-```
-1.2 Crear issuer de cert-manager.
-```sh
 
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-issuer
+  namespace: openshift-cert-manager
+spec:
+  vault:
+    path: pki/openshift/sign/sandbox971-opentlc-com
+    server: https://vault-active.hashicorp.svc:8200
+    caBundle: $VAULT_LISTENER_CERT
+    auth:
+      kubernetes:
+        role: cert-manager-vault-issuer
+        mountPath: /v1/auth/kubernetes/
+        secretRef:
+          name: $CERT_MANAGER_ISSUER_TOKEN
+          key: token
+EOF
 ```
+
+2. 
 Como podemos observar en el ejemplo de código anterior, la autenticación se realiza mediante la SA predeterminada del namespace.
 
-Esto se configura en la interfaz de usuario de Vault → Acceso → Métodos de autenticación → app-kubernetes/team-one → Roles → team-one de la siguiente manera:  
+Esto se configura en la interfaz de usuario de Vault → Acceso → Métodos de autenticación → kubernetes/ → Roles → cert-manager-vault-issuer de la siguiente manera:  
 
-![auth-role-team-one.png](/images/auth-role-team-one.png)
+```
+vault write -tls-skip-verify auth/kubernetes/role/cert-manager-vault-issuer \
+  bound_service_account_names=vault-auth \
+  bound_service_account_namespaces=* \
+  policies=sandbox971-opentlc-com \
+  ttl=24h
+
+```
+
+3. Depliegue de app demo
+
+```
+oc new-project apache
+oc new-app httpd-example
+
+oc get routes
+oc delete route httpd-example
+```
 
 
+4. Creacion de certificados para probar toda la solución y exposición del servicio via Ingress para crear una ruta de Openshift.
+
+```
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: httpd-example-certificate
+spec:
+  secretName: httpd-example-secret
+  commonName: httpd.vault.int.company.io
+  dnsNames:
+  - httpd-example-apache.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+EOF
+
+oc get secret
+
+cat <<EOF| oc apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: httpd-example-ingress
+spec:
+  tls:
+  - hosts:
+      - httpd-example-demo.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+    secretName: httpd-example-secret
+  rules:
+  - host: httpd-example-demo.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: httpd-example
+            port:
+              number: 8080
+EOF
+
+```
 
 
 
