@@ -1,0 +1,722 @@
+export CERT_ROOT=/root/poc
+
+mkdir -p ${CERT_ROOT}/{root,intermediate}
+
+cd ${CERT_ROOT}/root/
+
+openssl genrsa -out ca.key 2048
+
+touch index.txt
+echo 1000 > serial
+mkdir -p newcerts
+
+cat <<EOF > openssl.cnf
+[ ca ]
+default_ca = CA_default
+
+[ CA_default ]
+# Directory and file locations.
+dir               = ${CERT_ROOT}/root
+certs             = \$dir/certs
+crl_dir           = \$dir/crl
+new_certs_dir     = \$dir/newcerts
+database          = \$dir/index.txt
+serial            = \$dir/serial
+RANDFILE          = \$dir/private/.rand
+
+# The root key and root certificate.
+private_key       = \$dir/ca.key
+certificate       = \$dir/ca.crt
+
+# For certificate revocation lists.
+crlnumber         = \$dir/crlnumber
+crl               = \$dir/crl/ca.crl
+crl_extensions    = crl_ext
+default_crl_days  = 30
+
+# SHA-1 is deprecated, so use SHA-2 instead.
+default_md        = sha256
+
+name_opt          = ca_default
+cert_opt          = ca_default
+default_days      = 375
+preserve          = no
+
+policy            = policy_strict
+
+[ policy_strict ]
+# The root CA should only sign intermediate certificates that match.
+countryName               = match
+stateOrProvinceName       = optional
+organizationName          = optional
+organizationalUnitName    = optional
+commonName                = supplied
+emailAddress              = optional
+
+[ v3_intermediate_ca ]
+# Extensions for a typical intermediate CA.
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true, pathlen:1
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+
+[req_distinguished_name]
+countryName = AR
+countryName = Country Name
+countryName_default = AR
+stateOrProvinceName = State or Province Name
+stateOrProvinceName_default = BA
+localityName= Locality Name
+localityName_default = CABA
+organizationName= Organization Name
+organizationName_default = Semperti
+commonName= Company Name
+commonName_default = company.io
+commonName_max = 64
+
+[req]
+distinguished_name = req_distinguished_name
+[ v3_ca ]
+basicConstraints = critical,CA:TRUE
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer:always
+EOF
+
+openssl req -x509 -new -nodes -key ca.key -sha256 -days 1024 -out ca.crt -extensions v3_ca -config openssl.cnf
+
+cd ../intermediate
+
+openssl genrsa -out ca.key 2048
+
+openssl req -new -sha256 -key ca.key -out ca.csr
+
+openssl ca -config ../root/openssl.cnf -extensions v3_intermediate_ca -days 365 -notext -md sha256 -in ca.csr -out ca.crt
+
+oc new-project hashicorp
+
+
+oc create secret tls intermediate --cert=${CERT_ROOT}/intermediate/ca.crt --key=${CERT_ROOT}/intermediate/ca.key -n hashicorp
+
+cat <<EOF | oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: int-ca-issuer
+spec:
+  ca:
+    secretName: intermediate
+EOF
+
+oc get issuer int-ca-issuer
+
+export BASE_DOMAIN=$(oc get dns cluster -o jsonpath='{.spec.baseDomain}')
+export VAULT_HELM_RELEASE=vault
+export VAULT_ROUTE=${VAULT_HELM_RELEASE}.apps.$BASE_DOMAIN
+export VAULT_ROUTE_DR=${VAULT_HELM_RELEASE}-dr.apps.$BASE_DOMAIN
+export VAULT_ADDR=https://${VAULT_ROUTE}
+export VAULT_SERVICE=${VAULT_HELM_RELEASE}-active.hashicorp.svc
+export VAULT_SKIP_VERIFY="true"
+
+cat <<EOF|oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-certs
+spec:
+  secretName: vault-certs
+  issuerRef:
+    name: int-ca-issuer
+    kind: Issuer
+  dnsNames: 
+  - ${VAULT_ROUTE}
+  # Service Active FQDN
+  - ${VAULT_SERVICE}
+  organization:
+  - company.io
+EOF
+
+oc get secret vault-certs
+
+------------------------------------------------------------------------
+--------------------------- Helm Vault -------------------------------
+------------------------------------------------------------------------
+cd ~/poc/
+mkdir -p vault
+cd vault/
+
+helm repo add hashicorp https://helm.releases.hashicorp.com
+helm repo update
+
+cat <<EOF > values.yaml
+global:
+  tlsDisable: false
+  openshift: true
+injector:
+  image:
+    repository: "registry.connect.redhat.com/hashicorp/vault-k8s"
+    tag: "0.14.2-ubi"
+  agentImage:
+    repository: "registry.connect.redhat.com/hashicorp/vault"
+    tag: "1.9.6-ubi"
+ui:
+  enabled: true
+server:
+  image:
+    repository: "hashicorp/vault-enterprise"
+    tag: "1.9.6-ent"
+  route:
+    enabled: true
+    host:
+  extraEnvironmentVars:
+    VAULT_CACERT: "/etc/vault-tls/vault-certs/ca.crt"
+    VAULT_TLS_SERVER_NAME:
+    VAULT_LICENSE: "02MV4UU43BK5HGYYTOJZWFQMTMNNEWU33JLJWVSMCZNVKTETSUMN2E2VCVGFGVGMDXJVWVKNKMK5ITCWKXIV2E6RDINFNG2UJRJZDVCNKNGJNGSSLJO5UVSM2WPJSEOOLULJMEUZTBK5IWST3JJF3U2RCFGVHFOVL2JZUTANC2KRMTCTCXLE2E6V2NORMXUSTMLF4TA522KRBG2TRSLF3U6VDLGJHVOVLJJRBUU4DCNZHDAWKXPBZVSWCSOBRDENLGMFLVC2KPNFEXCSLJO5UWCWCOPJSFOVTGMRDWY5C2KNETMSLKJF3U22SJORGUIZ3UJVVFMVKNKRVTMTKULE3E2VDDOVHGUTLZJZ5FK6CPIRIXSV3JJFZUS3SOGBMVQSRQLAZVE4DCK5KWST3JJF4U2RCJPFGFIQJUJRKESMKWIRCTKT3KIUZE62SFGNLWSSLTJFWVMNDDI5WHSWKYKJYGEMRVMZSEO3DULJJUSNSJNJEXOTLKJF2E2RDLORGWUUSVJVKGWNSNKRMTMTKUMRQUS2LXNFSEOVTZMJLWY5KZLBJHAYRSGVTGIR3MORNFGSJWJFVES52NNJEXITKENN2E22SWKVGVI2ZWJVKFSNSNKRSGCSLJO5UWGSCKOZNEQVTKMRBUSNSJNZNGQZCXPAYES2LXNFNG26DILIZU22KPNZZWSYSXHFVWIV3YNRRXSSJWK54UU5DEK54DAYKTGFVVS6JRPJMTERTTLJJUS42JNVSHMZDNKZ4WE3KGOVMTEVLUMNDTS43BK5HDKSLJO5UVSV2SGJMVONLKLJLVC5C2I5DDAWKTGF3WG3JZGBNFOTRQMFLTS5KJNQYTSZSRHU6S4WKJLJVHKWTQGJ2XM6CLOZIUE4SIMJMEMM2XIVTVQQRWIVCUWK2DMQ3UQY3DJ5CDOWKFMNLEYSKZNFMG6S3CNF3VG4ZSIUVWWQKWKJXUWSSUKRNG2ZCEJ5UGO4LTINKUY53EKFTEGSRRMRAWWY3BGRSFMMBTGM4FA53NKZWGC5SKKA2HASTYJFETSRBWKVDEYVLBKZIGU22XJJ2GGRBWOBQWYNTPJ5TEO3SLGJ5FAS2KKJWUOSCWGNSVU53RIZSSW3ZXNMXXGK2BKRHGQUC2M5JS6S2WLFTS6SZLNRDVA52MG5VEE6CJG5DU6YLLGZKWC2LBJBXWK2ZQKJKG6NZSIRIT2PI"
+  standalone:
+    enabled: false
+  auditStorage:
+    enabled: true
+    size: 15Gi
+  extraVolumes:
+    - type: "secret"
+      name: "vault-certs"
+      path: "/etc/vault-tls"
+  ha:
+    enabled: true
+    raft:
+      enabled: true
+      setNodeId: true
+      config: |
+        ui = true
+        listener "tcp" {
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_cert_file = "/etc/vault-tls/vault-certs/tls.crt"
+          tls_key_file = "/etc/vault-tls/vault-certs/tls.key"
+          tls_client_ca_file = "/etc/vault-tls/vault-certs/ca.crt"
+        }
+        storage "raft" {
+          path = "/vault/data"
+          retry_join {
+            leader_api_addr = "https://vault-active.hashicorp.svc:8200"
+            leader_ca_cert_file = "/etc/vault-tls/vault-certs/ca.crt"
+          }
+        }
+        log_level = "debug"
+        service_registration "kubernetes" {}
+  service:
+    enabled: true
+EOF
+
+helm install vault hashicorp/vault -f values.yaml \
+    --set server.route.host=$VAULT_ROUTE \
+    --set server.extraEnvironmentVars.VAULT_TLS_SERVER_NAME=$VAULT_ROUTE \
+    --wait \
+    -n hashicorp
+    
+env |grep VAULT
+
+oc -n hashicorp exec -ti vault-0 -- vault operator init -key-threshold=1 -key-shares=1
+
+oc -n hashicorp exec -ti vault-0 -- vault operator unseal
+oc -n hashicorp exec -ti vault-1 -- vault operator unseal
+oc -n hashicorp exec -ti vault-2 -- vault operator unseal
+
+oc -n hashicorp rsh vault-0
+
+vault login
+
+vault operator raft list-peers
+
+------------------------------------------------------------------------
+--------------------------- Vault CLI -------------------------------
+------------------------------------------------------------------------
+yum install -y yum-utils
+yum-config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
+yum -y install vault
+
+export BASE_DOMAIN=$(oc get dns cluster -o jsonpath='{.spec.baseDomain}')
+export VAULT_HELM_RELEASE=vault
+export VAULT_ROUTE=${VAULT_HELM_RELEASE}.apps.$BASE_DOMAIN
+export VAULT_ROUTE_DR=${VAULT_HELM_RELEASE}-dr.apps.$BASE_DOMAIN
+export VAULT_ADDR=https://${VAULT_ROUTE}
+export VAULT_SERVICE=${VAULT_HELM_RELEASE}-active.hashicorp.svc
+export VAULT_SKIP_VERIFY="true"
+
+vault status
+--------------------------------
+
+
+
+------------------------------------------------------------------------
+--------------------------- PKI Intermediate en Vault -------------------------------
+------------------------------------------------------------------------
+mkdir ~/poc/vault/int-ca && cd ~/poc/vault/int-ca
+
+vault login
+
+vault secrets enable -path=pki/intermediate -max-lease-ttl=8760h pki
+
+
+## En GUI Crear CSR con:
+
+URL: 
+	  - Issuing certificates: https://vault.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com/v1/pki/intermediate/ca
+	  - CRL Distribution Points: https://vault.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com/v1/pki/intermediate/crl
+	  
+CA certificate:
+	CA Type: Intermediate
+	Type: Internal
+	common_name= vault.int.company.io
+	Options> OU: SI
+	Address Options:          
+	Country: AR
+	Locality/City: CABA
+	Province/State: BA
+	
+	
+	maxPathLength: 1
+	
+echo "-----BEGIN CERTIFICATE REQUEST-----
+MIICzDCCAbQCAQAwVTELMAkGA1UEBhMCQVIxCzAJBgNVBAgTAkJBMQ0wCwYDVQQH
+EwRDQUJBMQswCQYDVQQLEwJTSTEdMBsGA1UEAxMUdmF1bHQuaW50LmNvbXBhbnku
+aW8wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDFG7w8VLd6aAvRsgZR
+ue/c4QIuH5U2nYd5oOUxZwLhCvatl404ayKCvFi1JK/nPCJ9Zxk/8oNY340ZUiqa
+Kq/XMCN34ZayO1TeNndlhvtI8v5AVhobf7AasCbuEimMwvfbdMr6k3GUSR4OgRC9
+Rv538UiiUHv7TTw5g615QeFzn1c5cVpUdob4qSXZwtRRyEhQl7J01I2IUDMQlK3B
+J0W0NmCUFmjaJ9dnafGJTjIcB7HheORIM5BMVBrg6VOEQWDU5jnAjW8olJIKex0v
+81AgeWBY/JIJpyvip82MXDfadkoq3RHZzjagd1IEq/P7yLzdQHGFg1r7w4YjyHP5
+OqYFAgMBAAGgMjAwBgkqhkiG9w0BCQ4xIzAhMB8GA1UdEQQYMBaCFHZhdWx0Lmlu
+dC5jb21wYW55LmlvMA0GCSqGSIb3DQEBCwUAA4IBAQAJNTBF7CA+cuzD7/7ipv6I
+ZR11tTkF4uNOosOCvTFrtZ/MPWrLNJWDutkm0byruUEBre5S+aAm4GoG8Wz4pgts
+rwdWigIePScS9p/3GLEaAAw858wci+pWUTVMeZ/Sr0Sw/RYu91z4+QAmeaFsJx7p
+drhcdgS/KX8a2YGYWdP35N4C4cCH0nsNkNWdZo9+K/+6fmIxZUOqx2RnnpGSz6Zi
++lhKsYyxAHz5uybYJPxJupW+PFSCFZLOqRoDg8jYo0bFOMvtiHQrdsHFdR4pRQww
+NtqllBpO1l/sUrX9HZiUV6SwzUyWNhRmeGSmby7yyObMb4A1egfJHQHuMyK4+M0f
+-----END CERTIFICATE REQUEST-----" > ~/poc/vault/int-ca/pki_int.csr
+
+openssl req -in pki_int.csr -noout -text
+
+#### sign cert manual by offline root ca 
+
+openssl ca -config ${CERT_ROOT}/root/openssl.cnf -extensions v3_intermediate_ca -days 365 -notext -md sha256 -in pki_int.csr -out signed_certificate_int.pem
+
+openssl x509 -in signed_certificate_int.pem -text -noout
+
+Subir el CRT via GUI
+
+vault write pki/intermediate/config/urls issuing_certificates="https://${VAULT_ROUTE}/v1/pki/intermediate/ca" crl_distribution_points="https://${VAULT_ROUTE}/v1/pki/intermediate/crl"
+
+------------------------------------------------------------------------
+-------------------- PKI Openshift en Vault --------------------
+------------------------------------------------------------------------
+
+
+mkdir ~/poc/vault/pki-openshift && cd ~/poc/vault/pki-openshift
+ 
+vault secrets enable -path=pki/openshift -max-lease-ttl=8760h pki
+
+vault write pki/openshift/config/urls issuing_certificates="https://${VAULT_ROUTE}/v1/pki/openshift/ca" crl_distribution_points="https://${VAULT_ROUTE}/v1/pki/openshift/crl"
+
+vault write pki/openshift/roles/sandbox971-opentlc-com allowed_domains="*.vault.int.company.io"  allowed_domains="*.svc"  allowed_domains="*.apps.${BASE_DOMAIN}" allow_subdomains=true allowed_other_sans="*" allowed_uri_sans="*.apps.${BASE_DOMAIN}" max_ttl=8760h 
+
+vault write -field=csr pki/openshift/intermediate/generate/internal common_name="apps.${BASE_DOMAIN}" ttl=4760h >> pki_openshift.csr
+
+openssl req -in pki_openshift.csr -noout -text
+
+vault write -field=certificate pki/intermediate/root/sign-intermediate csr=@pki_openshift.csr format=pem_bundle ttl=4760h >> signed_certificate_pki_openshift.pem
+
+openssl x509 -in signed_certificate_pki_openshift.pem -text -noout
+
+vault write pki/openshift/intermediate/set-signed certificate=@signed_certificate_pki_openshift.pem
+
+MOSTRAR Y VALIDAR EN GUI
+	EJ HABILITAR EXTENSIONS
+
+
+------------------------------------------------------------------------
+-------------------- Auth/Policy y Role para Cert Manager en Vault --------------------
+------------------------------------------------------------------------
+
+oc create sa vault-auth -n openshift-cert-manager
+oc adm policy add-cluster-role-to-user system:auth-delegator -z vault-auth
+secret=`oc describe sa vault-auth -n openshift-cert-manager | grep 'Tokens:' | awk '{print $2}'`
+token=`oc describe secret $secret | grep 'token:' | awk '{print $2}'`
+pod=`oc get pods -n hashicorp | grep vault | awk '{print $1; exit}'`
+oc exec $pod -n hashicorp -- cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt >  ca.crt
+
+vault auth enable kubernetes
+
+vault write -tls-skip-verify auth/kubernetes/config token_reviewer_jwt=$token kubernetes_host=https://kubernetes.default.svc:443 kubernetes_ca_cert=@ca.crt
+
+
+cat <<EOF > ./policy.hcl
+path "/*" {
+  capabilities = ["create", "read", "update", "delete", "list","sudo"]
+}
+EOF
+
+vault policy write vault-admin ./policy.hcl
+
+vault write -tls-skip-verify auth/kubernetes/role/vault-admin bound_service_account_names=vault-auth bound_service_account_namespaces=* policies=vault-admin ttl=24h
+
+
+vault write -tls-skip-verify auth/kubernetes/role/cert-manager-vault-issuer \
+  bound_service_account_names=vault-auth \
+  bound_service_account_namespaces=* \
+  policies=sandbox971-opentlc-com \
+  ttl=24h
+
+
+export CERT_MANAGER_ISSUER_TOKEN=$(oc describe sa vault-auth -n openshift-cert-manager | grep 'Tokens:' | awk '{print $2}')
+export VAULT_LISTENER_CERT=$(oc get secret vault-certs -n hashicorp -o json | jq -r '.data."ca.crt"')
+
+
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-issuer
+  namespace: openshift-cert-manager
+spec:
+  vault:
+    path: pki/openshift/sign/sandbox971-opentlc-com
+    server: https://vault-active.hashicorp.svc:8200
+    caBundle: $VAULT_LISTENER_CERT
+    auth:
+      kubernetes:
+        role: cert-manager-vault-issuer
+        mountPath: /v1/auth/kubernetes/
+        secretRef:
+          name: $CERT_MANAGER_ISSUER_TOKEN
+          key: token
+EOF
+
+
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: httpd-example-certificate
+spec:
+  secretName: httpd-example-secret
+  commonName: httpd.vault.int.company.io
+  dnsNames:
+  - httpd-example-apache.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+EOF
+
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+
+oc new-project apache
+oc new-app httpd-example
+
+oc get routes
+oc delete route httpd-example
+
+
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: httpd-example-certificate
+spec:
+  secretName: httpd-example-secret
+  commonName: httpd.vault.int.company.io
+  dnsNames:
+  - httpd-example-apache.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+EOF
+
+oc get secret
+
+cat <<EOF| oc apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: httpd-example-ingress
+spec:
+  tls:
+  - hosts:
+      - httpd-example-demo.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+    secretName: httpd-example-secret
+  rules:
+  - host: httpd-example-demo.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: httpd-example
+            port:
+              number: 8080
+EOF
+
+
+
+
+
+
+vault write -tls-skip-verify auth/kubernetes/role/vault-admin bound_service_account_names=vault-auth bound_service_account_namespaces=* policies=vault-admin ttl=24h
+
+
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+
+
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+
+
+
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+
+
+
+
+
+
+vault auth enable -path=app-kubernetes/app1 kubernetes
+
+oc new-project app1
+
+oc create sa vault-auth
+
+secret=`oc describe sa vault-auth | grep 'Tokens:' | awk '{print $2}'`
+
+token=`oc describe secret $secret | grep 'token:' | awk '{print $2}'`
+
+vault write auth/app-kubernetes/app1/config token_reviewer_jwt=$token kubernetes_host=https://kubernetes.default.svc:443 kubernetes_ca_cert=@${CERT_ROOT}/intermediate/ca.crt
+
+cat <<EOF > policy.hcl
+# query existing mounts
+path "/sys/mounts" {
+  capabilities = [ "list", "read"]
+  allowed_parameters = {
+    "type" = ["pki"]
+    "*"   = []
+  }
+}
+
+# mount pki secret engines
+path "/sys/mounts/pki/openshift*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# tune
+path "/sys/mounts/pki/openshift/tune" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# internal sign pki
+path "pki/intermediate/root/sign-intermediate" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# pki 
+path "pki/openshift*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+EOF
+
+vault policy write app1-pki-engine policy.hcl 
+
+vault write auth/app-kubernetes/app1/role/app1 bound_service_account_names=default bound_service_account_namespaces=app1 policies=app1-pki-engine
+
+------------------------------------------------------------------------
+--------------------------- PKI app1 en Vault -------------------------------
+------------------------------------------------------------------------
+
+vault secrets enable -path=app-pki/app1 -max-lease-ttl=8760h pki
+
+vault write app-pki/app1/config/urls issuing_certificates="https://vault.apps.cluster-lb2d26.lb2d26.sandbox1722.opentlc.com/v1/pki/ca" crl_distribution_points="https://vault.apps.cluster-lb2d26.lb2d26.sandbox1722.opentlc.com/v1/pki/crl"
+
+vault write app-pki/app1/roles/app1 allowed_domains="app1.vault.int.company.io"  allowed_domains="app1.svc"  allowed_domains="*app1.apps.cluster-lb2d26.lb2d26.sandbox1722.opentlc.com" allow_subdomains=true allowed_other_sans="*" allowed_uri_sans="*-app1.apps.cluster-lb2d26.lb2d26.sandbox1722.opentlc.com" max_ttl=8760h
+
+vault write  -field=csr app-pki/app1/intermediate/generate/internal common_name="apps.cluster-lb2d26.lb2d26.sandbox1722.opentlc.com" ttl=4760h >> pki_int.csr
+
+vault write -field=certificate pki/intermediate/root/sign-intermediate csr=@pki_int.csr format=pem_bundle ttl=4760h >> signed_certificate.pem
+
+vault write app-pki/app1/intermediate/set-signed certificate=@signed_certificate.pem
+---------------------------
+export CA_BUNDLE=$(oc get secret vault-certs -n hashicorp -o json | jq -r '.data."ca.crt"')
+export DEFAULT_SECRET=$(oc get sa vault-auth -n hashicorp -o json | jq -r '.secrets[1].name')
+
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: app1-issuer-vault
+  namespace: hashicorp
+spec:
+  vault:
+    path: pki/openshift/sign/sandbox971-opentlc-com
+    server: https://vault-active.hashicorp.svc:8200
+    caBundle: $CA_BUNDLE
+    auth:
+      kubernetes:
+        role: vault-admin
+        mountPath: /v1/auth/kubernetes/
+        secretRef:
+          key: token
+          name: $DEFAULT_SECRET
+EOF
+
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app1-route-certificate
+spec:
+  secretName: app1-route-secret
+  commonName: client-app1.apps.cluster-lb2d26.lb2d26.sandbox1722.opentlc.com
+  dnsNames:
+  - client-app1.apps.cluster-lb2d26.lb2d26.sandbox1722.opentlc.com
+  issuerRef:
+    name: app1-issuer-vault
+EOF
+
+-------------------- Auth/Policy y Role de Cert Manager en Vault --------------------
+cat <<EOF > cert-manager-vault-issuer-policy-pki.hcl
+path "pki/openshift/sign/sandbox1722-opentlc-com" {
+  capabilities = ["read", "update", "list", "delete"]
+}
+path "pki/openshift/issue/sandbox1722-opentlc-com" {
+  capabilities = ["read", "update", "list", "delete"]
+}
+EOF
+
+vault policy write sandbox1722-opentlc-com cert-manager-vault-issuer-policy-pki.hcl
+
+vault write -tls-skip-verify auth/kubernetes/role/cert-manager-vault-issuer \
+  bound_service_account_names=cert-manager-vault-issuer \
+  bound_service_account_namespaces=openshift-cert-manager \
+  policies=sandbox1722-opentlc-com \
+  ttl=24h
+
+oc create sa cert-manager-vault-issuer -n openshift-cert-manager
+
+CERT_MANAGER_ISSUER_TOKEN=$(oc get sa/cert-manager-vault-issuer -n openshift-cert-manager -o yaml | grep cert-manager-vault-issuer-token | awk '{print $3}')
+
+VAULT_LISTENER_CERT=$(oc exec -n hashicorp -it $(oc get pods -n hashicorp | grep vault-0 | awk '{print $1}') -- /bin/sh -c "cat /etc/vault-tls/vault-certs/tls.crt")
+
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-issuer
+  namespace: openshift-cert-manager
+spec:
+  vault:
+    path: pki/openshift/sign/sandbox1722-opentlc-com
+    server: https://vault-active.hashicorp.svc:8200
+    caBundle: $VAULT_LISTENER_CERT
+    auth:
+      kubernetes:
+        role: cert-manager-vault-issuer
+        mountPath: /v1/auth/kubernetes/
+        secretRef:
+          name: $CERT_MANAGER_ISSUER_TOKEN
+          key: token
+EOF
+
+-------------------- PKI Openshift en Vault --------------------
+mkdir ~/poc/vault/pki-openshift && cd ~/poc/vault/pki-openshift
+ 
+vault secrets enable -path=pki/openshift -max-lease-ttl=8760h pki
+
+vault write pki/openshift/config/urls issuing_certificates="https://${VAULT_ROUTE}/v1/pki/openshift/ca" crl_distribution_points="https://${VAULT_ROUTE}/v1/pki/openshift/crl"
+
+vault write pki/openshift/roles/sandbox971-opentlc-com allowed_domains="*.vault.int.company.io"  allowed_domains="*.svc"  allowed_domains="*.apps.${BASE_DOMAIN}" allow_subdomains=true allowed_other_sans="*" allowed_uri_sans="*.apps.${BASE_DOMAIN}" max_ttl=8760h 
+
+vault write -field=csr pki/openshift/intermediate/generate/internal common_name="apps.${BASE_DOMAIN}" ttl=4760h >> pki_openshift.csr
+
+openssl req -in pki_openshift.csr -noout -text
+
+vault write -field=certificate pki/intermediate/root/sign-intermediate csr=@pki_openshift.csr format=pem_bundle ttl=4760h >> signed_certificate_pki_openshift.pem
+
+openssl x509 -in signed_certificate_pki_openshift.pem -text -noout
+
+vault write pki/openshift/intermediate/set-signed certificate=@signed_certificate_pki_openshift.pem
+
+MOSTRAR Y VALIDAR EN GUI
+	EJ HABILITAR EXTENSIONS
+
+
+	
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: httpd-example-certificate
+spec:
+  secretName: httpd-example-secret
+  commonName: httpd.vault.int.company.io
+  dnsNames:
+  - httpd-example-apache.apps.cluster-lb2d26.lb2d26.sandbox1722.opentlc.com
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+EOF
+
+
+cat <<EOF| oc apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: httpd-example-ingress
+spec:
+  tls:
+  - hosts:
+      - demo-apache.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+    secretName: demo-example-secret
+  rules:
+  - host: demo-apache.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: httpd-example
+            port:
+              number: 8080
+EOF
+
+
+
+
+
+===============
+
+
+
+cat <<EOF| oc apply -f -
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: httpd-example-certificate
+spec:
+  secretName: demo-example-secret
+  commonName: demo.vault.int.company.io
+  dnsNames:
+  - demo-apache.apps.cluster-lb79f8.lb79f8.sandbox971.opentlc.com
+  issuerRef:
+    name: vault-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+EOF
+

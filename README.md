@@ -1,10 +1,10 @@
 # Cómo proteger las aplicaciones nativas de la nube con HashiCorp Vault y Cert Manager
 
-Cuando hablamos de seguridad en las organizaciones, generalmente nos referimos a la prevención de la pérdida de datos, o también a la automatización e integración segura de aplicaciones. Para lograr esto, es necesario saber quién está haciendo qué con qué activos, y ahí es donde entra en juego la gestión de identidades, como HashiCorp Vault. El "quién" en la ecuación se vuelve muy importante. 
+Cuando hablamos de seguridad en las organizaciones, generalmente nos referimos a la prevención de la pérdida de datos, o también a la automatización e integración segura de aplicaciones. Para lograr esto, es necesario saber quién está haciendo qué con qué activos, y ahí es donde entra en juego la gestión de identidades, HashiCorp Vault. El "quién" en la ecuación se vuelve muy importante. 
 
-Los certificados emitidos correctamente permiten la seguridad de extremo a extremo a través de una cadena de identidades confiable (PKI). Resulta que la emisión de certificado pasa ser una tarea cotidina y repetitida dado que debe acompañar la cedencia del despliegue de aplicacion, es decir, esta gestion debe ser tan ágil como el propio proceso de despligue, por lo tanto se requiere automatización más allá de la gestión de identidades.
+Los certificados emitidos correctamente permiten la seguridad de extremo a extremo a través de una cadena de identidades confiable (PKI). Resulta que la emisión de certificados pasa ser una tarea cotidina y repetitida dado que este proceso debe acompañar la cedencia del despliegue de aplicaciones, es decir, esta gestion debe ser tan ágil como el propio proceso de despligue, por lo tanto se requiere automatización más allá de la gestión de identidades.
 
-Como ocurre con la mayoría de los objetivos de seguridad, suele haber tensión entre el requisito de hacer que las cosas sean seguras y tratar de hacer el trabajo real. El arte aquí es equilibrar los dos requisitos en conflicto, una forma de reducir la carga del desarrollador e infraestructura es automatizar tanto como sea posible.
+Como ocurre con la mayoría de los objetivos de seguridad, suele haber fricción entre el requisito de hacer que las cosas sean seguras y tratar de hacer el trabajo real. El arte aquí es equilibrar los dos requisitos en conflicto, una forma de reducir la carga del desarrollador e infraestructura es automatizar tanto como sea posible.
 
 En este articulo, se probará cómo se puede usar OpenShift junto con Cert Manager y HashiCorp Vault para lograr un proceso automatizado y reproducible para aumentar la seguridad de las aplicaciones.
 
@@ -43,17 +43,19 @@ El estándar X.509 incluye una plantilla para configurar una jerarquía de CA:
 # Instalación
 
 ## Administrador de certificados
-El operador [Cert Manager] provisto por JetStack es una herramienta para Kubernetes y Openshift que automatiza la gestión de certificados en entornos nativos de la nube.
+El operador [Cert Manager](https://cert-manager.io/) provisto por JetStack pero es una herramienta para Kubernetes y Openshift que automatiza la gestión de certificados en entornos nativos de la nube. 
 
-Se basa en estas plataformas para proporcionar certificados X.509 y emisores como tipos de recursos de primera clase.
-Proporciona herramientas fáciles de usar para administrar certificados, incluidos "certificados como servicio" para habilitar de forma segura a los desarrolladores y aplicaciones que trabajan dentro de un clúster y una API estandarizada para interactuar con múltiples autoridades de certificación (CA). Esto brinda a los equipos de seguridad la confianza para permitir que los desarrolladores administren los certificados en forma de autoservicio.
+>Este operador a partir de la version de Openshift 4.10 es provisto y soportado  por Red Hat de manera oficial.
 
-[Cert Manager] integra una variedad de Emisores, tanto Emisores públicos populares como Emisores privados, y se asegurará de que los certificados sean válidos y estén actualizados, e intentará renovar los certificados en un momento configurado antes de su vencimiento.
+El principio se basa en que estas plataformas puedan proporcionar certificados X.509 de forma dinamica trabajando a los emisores (Issuers) como si fueran objetos de Kubernetes.
+Proporciona herramientas fáciles de usar para administrar certificados, incluidos "certificados como servicio" para habilitar de forma segura a los desarrolladores y aplicaciones que trabajan dentro de un clúster una API estandarizada para interactuar con múltiples autoridades de certificación (CA). Esto tambien brinda a los equipos de seguridad informatica la confianza para permitir que los desarrolladores administren los certificados en forma autonoma.
+
+[Cert Manager](https://cert-manager.io/) integra una variedad de Emisores, tanto Emisores públicos populares como Emisores privados, y se asegurará de que los certificados sean válidos y estén actualizados. Es decir, intentará renovar los certificados antes de su vencimiento.
 
 #
 
 ## Crear la cadena de CA
-Comencemos desde cero y simulemos la creación de nuestra propia autoridad de certificación y la construcción de la jerarquía de CA.
+Comencemos desde cero y simulemos la creación de nuestra propia autoridad de certificación (CA) y la construcción de la jerarquía de la misma.
 
 Vamos a crear el root CA certificate-key pair utilizando el programa OpenSSL.
 
@@ -70,7 +72,10 @@ mkdir  -p ${CERT_ROOT} /{root,intermediate}
 ```
 Genere la CA certificate-key pair:
 ```sh
-cd ${CERT_ROOT} /root/ openssl genrsa -out ca.key 2048 touch index.txt echo 1000 > serial mkdir -p newcerts 
+cd ${CERT_ROOT} /root/ openssl genrsa -out ca.key 2048 
+touch index.txt 
+echo 1000 > serial 
+mkdir -p newcerts 
 ```
 
 Defina el archivo openssl.cnf:
@@ -126,15 +131,15 @@ basicConstraints = critical, CA:true, pathlen:1
 keyUsage = critical, digitalSignature, cRLSign, keyCertSign
 
 [req_distinguished_name]
-countryName = CH
+countryName = AR
 countryName = Country Name
-countryName_default = CH
+countryName_default = AR
 stateOrProvinceName = State or Province Name
-stateOrProvinceName_default = ZH
+stateOrProvinceName_default = BA
 localityName= Locality Name
-localityName_default = Zurich
+localityName_default = CABA
 organizationName= Organization Name
-organizationName_default = Red Hat
+organizationName_default = Semperti
 commonName= Company Name
 commonName_default = company.io
 commonName_max = 64
@@ -148,10 +153,9 @@ authorityKeyIdentifier = keyid:always,issuer:always
 EOF
 ```
 Generar el certificado:
-
 ```sh
-
 openssl req -x509 -new -nodes -key ca.key -sha256 -days 1024 -out ca.crt -extensions v3_ca -config openssl.cnf
+
 You are about to be asked to enter information that will be incorporated
 into your certificate request.
 What you are about to enter is what is called a Distinguished Name or a DN.
@@ -181,7 +185,7 @@ Generamos la clave privada de CA intermedia:
 ```sh
 cd  ../intermediate 
 
-openssl  genrsa  -out  ca.key  2048
+openssl genrsa -out ca.key 2048
 ```
 
 Generamos el CSR correspondiente.
@@ -208,15 +212,12 @@ Please enter the following 'extra' attributes
 to be sent with your certificate request
 A challenge password []:
 ```
-
-Asegúrese de que el Country Name y el Common Name estén definidos, ya que la política ( policy_strict ) establecida en openssl.cnf requiere un Country Name y Common Name coincidente.
+> Asegúrese de que el Country Name y el Common Name estén definidos, ya que la política ( policy_strict ) establecida en openssl.cnf requiere un Country Name y Common Name que coincidan.
 
 Creamos el certificado intermedio.
 
 ```sh
-
 openssl ca -config ../root/openssl.cnf -extensions v3_intermediate_ca -days 365 -notext -md sha256 -in ca.csr -out ca.crt
-
 ...
 
 Certificate is to be certified until May 12 12:52:52 2023 GMT (365 days)
@@ -231,9 +232,9 @@ Data Base Updated
 Nuestra CA intermedia a nivel del cluster ya está lista para ser utilizada.
 #
 ## Issuer con Cert Manager
-Lo primero que deberá configurar después de haber instalado cert-manager es que se cree un issuer que luego se puede usar para emitir certificados.
+Lo primero que deberá configurar después de haber instalado el *operador de cert-manager* es que se cree un issuer para poder usar luego y emitir certificados.
 
-Los issuers son recursos de Kubernetes que representan a las autoridades de certificación (CA) que pueden generar certificados firmados al cumplir con las solicitudes de firma de certificados.
+Los issuers son recursos de Kubernetes representados por las autoridades de certificación (CA) y que pueden generar certificados firmados cumpliendo con las solicitudes de firma de certificados (CSR).
 
 El tipo de issuer más simple es la CA, que hace referencia al secreto TLS de Kubernetes que contiene un certificate-key pair.
 
@@ -269,14 +270,13 @@ EOF
 Verifiquemos el estado del issuer para confirmar que se creó correctamente:
 
 ```sh
-oc  obtener  emisor  int-ca-emisor 
+oc get issuer int-ca-emisor
 
 NAME           READY      AGE 
-
 int-ca-emisor  True       5s
 ```
 
-> NOTA: Este issuer de Cert Manager específico, contiene la autoridad de certificación intermedia que se usa estrictamente para firmar el certificado de Vault únicamente. Ninguna otra aplicación solicitará certificados.
+> NOTA: Este issuer de Cert Manager específico, contiene la CA intermedia que se usa estrictamente para firmar el certificado de Vault únicamente. Ninguna otra aplicación solicitará certificados.
 
 Ahora crearemos un Certificado CR para HashiCorp Vault, pero, primero debemos definir algunas variables que utlizaremos durante todo el proceso:
 
@@ -312,7 +312,7 @@ EOF
 
 > NOTA : El certificado generado debe ser válido tanto para el servicio activo de Vault como para Vault Route.
 
-Una vez que cert-manager detecta la creación del Certificado CR, se generará un certificado SSL en nombre de la autoridad de certificación intermedia interna y se guardará como un secreto TLS de Kubernetes. 
+Una vez que cert-manager detecta la creación del Certificado CR, se generará un certificado SSL en nombre de la CA intermedia interna y se guardará como un secreto TLS de Kubernetes. 
 
 ```sh
 oc get secret vault-certs
@@ -327,7 +327,7 @@ vault-certs kubernetes.io/tls 3     12s
 #
 ## HashiCorp Vault
 
-[HashiCorp Vault] es un sistema de gestión de cifrado y secretos basado en la identidad.
+[HashiCorp Vault](https://www.vaultproject.io/) es un sistema de gestión de cifrado y secretos basado en la identidad.
 
 Un secreto es cualquier cosa a la que desee controlar estrictamente el acceso, como claves de cifrado API, contraseñas o certificados.
 
@@ -335,17 +335,17 @@ Vault proporciona servicios de encriptación controlados por métodos de autenti
 
 Con el certificado ahora en marcha, es hora de implementar y configurar Vault.
 
-La forma oficial de instalar Hashicorp Vault es usar el [Vault Helm Chart].
+La forma oficial de instalar Hashicorp Vault es usar el [Vault Helm Chart](https://www.vaultproject.io/docs/platform/k8s/helm).
 
-En entornos de producción, se implementa de manera de alta disponibilidad. HashiCorp Vault necesita un backend de almacenamiento subyacente para almacenar los datos y puede confiar en su [almacenamiento integrado] , que utiliza el algoritmo de consenso [RAFT].
+En entornos de producción, se implementa de manera de alta disponibilidad. HashiCorp Vault necesita un backend de almacenamiento subyacente para almacenar los datos y puede confiar en su [almacenamiento integrado](https://www.vaultproject.io/docs/configuration/storage/raft) , que utiliza el algoritmo de consenso [RAFT](https://www.vaultproject.io/docs/configuration/storage/raft).
 
 Cuando se implementa en OpenShift, el almacenamiento integrado es una solución conveniente para almacenar datos, ya que elimina la carga de administrar un componente de almacenamiento adicional para almacenar los datos de Vault.
 
 1. Cree un directorio de trabajo para la instalación de Vault.
 
 ```sh
-mkdir  -p  vault 
-cd  vault/
+mkdir -p vault 
+cd vault/
 ```
 
 2. Configure el repositorio de Helm:
@@ -474,8 +474,8 @@ vault-1    vault-1.vault-internal:8201    follower    true
 vault-2    vault-2.vault-internal:8201    follower    true
 ```
 
-8. Verifique el acceso desde la interfaz de usuario de Vault. En OpenShift Console, haga clic en Redes → Rutas y haga clic en la ruta de Vault .
-[](images/vault-ui.png)
+8. Verifique el acceso desde la interfaz de usuario de Vault. En OpenShift Web Console, haga clic en Redes → Rutas y haga clic en la ruta de Vault .
+[vault route](images/vault-ui.png)
 
 9. Para autenticarse, use el token root generado antes por el comando de inicialización.
 
@@ -489,14 +489,13 @@ En este punto, Vault está listo para integrarse en la plataforma OpenShift.
 
 El método de autenticación de Kubernetes se puede usar para autenticarse con Vault mediante un Service Account (SA) token de Kubernetes. El token de la SA de un pod se monta automáticamente dentro de un pod en /var/run/secrets/kubernetes.io/serviceaccount/token y se envía a Vault para su autenticación.    
 
-Vault, como todos los pods en Kubernetes, está configurado con una cuenta de servicio que tiene permisos para acceder a la API TokenReview . Esta SA se puede usar para realizar request  autenticadas a Kubernetes para verificar los tokens de las 
-SA de los pods que desean conectarse a Vault para obtener secretos.  
+Vault, como todos los pods en Kubernetes, está configurado con una cuenta de servicio que tiene permisos para acceder a la API TokenReview . Esta SA se puede usar para realizar request  autenticadas a Kubernetes para verificar los tokens de las SA de los pods que desean conectarse a Vault para obtener secretos.  
 
 ### Configuración de Vault para OpenShift
 
 #### Conectando Vault
 
-La conexión a Vault se puede inicializar con [las variables de entorno estándar de Vault] que se aplican al pod de operador de configuración de Vault. Consulte la [documentación de OLM] sobre cómo pasar variables de entorno a través de una suscripción. Las variables que se leen en la inicialización del cliente se enumeran [aquí] .  
+La conexión a Vault se puede inicializar con [las variables de entorno estándar de Vault] que se aplican al pod de operador de configuración de Vault. Consulte la [documentación de OLM] sobre cómo pasar variables de entorno a través de una suscripción. Las variables que se leen en la inicialización del cliente se enumeran [aquí].
 
 1. Descargue e instale el [cliente de Vault] siguiendo las instrucciones.
 
@@ -505,8 +504,16 @@ En el siguiente ejemplo se enumeran los comandos para instalarlo en ambientes Li
 sudo yum install -y yum-utils
 sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
 sudo yum -y install vault
+
+export BASE_DOMAIN=$(oc get dns cluster -o jsonpath='{.spec.baseDomain}')
+export VAULT_HELM_RELEASE=vault
+export VAULT_ROUTE=${VAULT_HELM_RELEASE}.apps.$BASE_DOMAIN
+export VAULT_ROUTE_DR=${VAULT_HELM_RELEASE}-dr.apps.$BASE_DOMAIN
+export VAULT_ADDR=https://${VAULT_ROUTE}
+export VAULT_SERVICE=${VAULT_HELM_RELEASE}-active.hashicorp.svc
+export VAULT_SKIP_VERIFY="true"
 ```
-2. Inicie sesión en Vault con la contraseña raíz que se mostró anteriormente al inicializar Vault:
+2. Inicie sesión en Vault con el **token root** que se mostró anteriormente al inicializar Vault:
 
 ```sh
 vault login -tls-skip-verify
@@ -526,78 +533,45 @@ EOF
 
 vault policy -tls-skip-verify write vault-admin ./policy.hcl
 ```
-[vault-admin-policy.png](images/vault-admin-policy.png)]
+![vault-admin-policy.png](images/vault-admin-policy.png)
 
 > NOTA: esta política es intencionalmente amplia para permitir probar cualquier accion en Vault. En un escenario productivo, esta política tendría un alcance reducido. 
 
-4. Cree un nuevo proyecto llamado "vault" donde desplegaremos distintas configuraciones:
+4. No movemos al proyecto de *cert-manager* y creamos una cuenta de servicio para autenticar con Vault. A traves de esta cuenta administraremos y consumiremos secretos de Vault.
+
 ```sh
-oc new-project hashic
+oc project openshift-cert-manager
+oc create sa vault-auth -n openshift-cert-manager
 ```
-5. Habilite el método de autenticación de Kubernetes obteniendo primero los detalles relacionados con la API de Kubernetes, incluido el certificado:
+
+5. Habilitamos el método de autenticación de Kubernetes obteniendo primero los detalles relacionados con la API de Kubernetes, incluido el certificado:
    
 ```sh
-JWT_SECRET=$(oc get sa controller-manager -o jsonpath='{.secrets}' | jq '.\[] | select(.name|test("token-")).name')
-JWT=$(oc sa get-token controller-manager)
-KUBERNETES_HOST=https://kubernetes.default.svc:443
+secret=`oc describe sa vault-auth -n openshift-cert-manager | grep 'Tokens:' | awk '{print $2}'`
+token=`oc describe secret $secret | grep 'token:' | awk '{print $2}'`
+pod=`oc get pods -n hashicorp | grep vault | awk '{print $1; exit}'`
+oc exec $pod -n hashicorp -- cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt >  ca.crt
 
-oc extract configmap/kube-root-ca.crt -n vault
+vault auth enable kubernetes
 
-vault auth enable -tls-skip-verify kubernetes
+vault write -tls-skip-verify auth/kubernetes/config token_reviewer_jwt=$token kubernetes_host=https://kubernetes.default.svc:443 kubernetes_ca_cert=@ca.crt
 
-vault write -tls-skip-verify auth/kubernetes/config token_reviewer_jwt=$JWT kubernetes_host=$KUBERNETES_HOST kubernetes_ca_cert=@./ca.crt
 ```
 6. Crear un Rol y asignarlo a la política previamente creada
    
 ```sh
-vault write -tls-skip-verify auth/kubernetes/role/vault-admin bound_service_account_names=controller-manager bound_service_account_namespaces=vault policies=vault-admin ttl=1h
+vault write -tls-skip-verify auth/kubernetes/role/vault-admin bound_service_account_names=vault-auth bound_service_account_namespaces=* policies=vault-admin ttl=24h
+
 ```
 Verifique el método de autenticación de kubernetes creado recientemente desde Vault UI → Access → AuthMethods.
    
 ![vault-authmethods.png](images/vault-authmethods.png)
 
-
-7. Cree un mapa de configuración que contenga nuestra CA intermedia nivel del cluster:
-
-```sh
-oc create configmap int-ca --from-file=${CERT_ROOT}/intermediate/ca.crt -n vault
-```
-8. Parche la suscripción para incluir la conexión a nuestra instancia de Vault:
-   
-```sh
-cat <<EOF > patch.yaml
-spec:
-  config:
-    env:
-    - name: VAULT_ADDR
-      value: https://vault-active.hashicorp.svc:8200
-    - name: VAULT_CACERT
-      value: /vault-ca/ca.crt
-    - name: VAULT_TOKEN
-      valueFrom:
-        secretKeyRef:
-          name: $JWT_SECRET
-          key: token
-    volumes:
-    - name: vault-ca
-      configMap:
-        name: int-ca
-    volumeMounts:
-    - mountPath: /vault-ca
-      name: vault-ca
-EOF
-
-
-oc patch subscription vault --type=merge --patch-file patch.yaml -n vault
-```
-El parche de la suscripción actualiza la implementación del operador de configuración de la bóveda con la nueva configuración, como se muestra en la imagen a continuación.
-
-![patch-suscription.png](/images/patch-suscription.png)
-
-9. Agregue la función de revisión de tokens para la SA del controller-manager para que lo utilice Vault:
+7. Agregue la función de revisión de tokens para la SA del controller-manager para que lo utilice Vault:
     
 ```sh
-oc adm policy add-cluster-role-to-user system:auth-delegator -z controller-manager
+oc adm policy add-cluster-role-to-user system:auth-delegator -z vault-auth
+
 ```
 #
 ## Vault PKI Secrets Engine.
@@ -612,11 +586,11 @@ Como se ve en el diagrama anterior, hay varios pasos para permitir que Vault sea
 
 Vault:
 
-1. Habilite el [Vault PKI Secrets Engine] en Vault.
+1. Habilitar el [Vault Kubernetes Auth] en Vault.
 
-2. Autorice Vault SA en k8s para la revisión de tokens.
+2. Autorizar Vault SA en k8s para la revisión de tokens.
 
-3. Habilite [Vault PKI Secrets Engine].
+3. Habilitar [Vault PKI Secrets Engine].
 
 4. Configure el rol de PKI en Vault.
 
@@ -632,14 +606,17 @@ Cert-Manager:
 
 Jerarquia CA:
 
-Es hora de crear la jerarquía de la cadena de CA con una root CA  fuera de línea y CA intermedia para Vault para cada namespaces de cada aplicación.
+Es hora de crear la jerarquía de la cadena de CA con una root CA fuera de línea y CA intermedia para Vault para cada namespaces de cada aplicación.
 
 Tener una CA intermedia dedicada por organización o equipo puede aumentar la seguridad y obtener un mayor control sobre la cadena de confianza en su ecosistema, lo que le permite confiar solo en los certificados emitidos por su modelo de confianza.
 
 ![ca-hierarchy.png](/images/ca-hierarchy.png)
 
-1. Cree un SecretEngineMount intermedio : 
+### PKI Intermediate
+
+1. Cree un SecretEngineMount intermediate : 
 ```sh
+vault secrets enable -path=pki/intermediate -max-lease-ttl=8760h pki
 
 ```
 Verifique desde la interfaz de usuario de Vault → Secretos que creó el motor secreto de PKI.
@@ -647,38 +624,50 @@ Verifique desde la interfaz de usuario de Vault → Secretos que creó el motor 
 ![pki-intermediate.png](/images/pki-intermediate.png)
 
 2. Configure un PKISecretEngineConfig intermedio : 
-```sh
-
-```
-
-> Nota: PKISecretEngineConfig permanece en estado de error hasta que se proporciona el certificado firmado.
- ```sh
-Waiting spec.externalSignSecret with signed intermediate certificate.
-```
-
-3. Firme el CSR con la CA raíz de la empresa:
 
 ```sh
+vault write pki/intermediate/config/urls issuing_certificates="https://${VAULT_ROUTE}/v1/pki/intermediate/ca" crl_distribution_points="https://${VAULT_ROUTE}/v1/pki/intermediate/crl"
 
 ```
-4. Cree el secreto con el certificado intermedio firmado:
+
+En GUI Crear CSR con:
+	  
+CA certificate:
+	CA Type: Intermediate
+	Type: Internal
+	common_name= vault.int.company.io
+	Options> OU: SI
+	Address Options:          
+	Country: AR
+	Locality/City: CABA
+	Province/State: BA
+
+Descargar el CSR para firmarlo offline. Este paso se realiza una sola vez.
+
+3. Leemos, validamos y firmamos el CSR con la CA Root offline:
 
 ```sh
+openssl req -in pki_int.csr -noout -text
 
+openssl ca -config ${CERT_ROOT}/root/openssl.cnf -extensions v3_intermediate_ca -days 365 -notext -md sha256 -in pki_int.csr -out signed_certificate_int.pem
+
+openssl x509 -in signed_certificate_int.pem -text -noout
 ```
-
-5. Parche el PKISecretEngineConfig con el nuevo secreto intermedio firmado.  
+4. Imprimimos, copiamos y pegamos el CRT via GUI
 
 ```sh
-
+cat signed_certificate_int.pem
 ```
+
 > Verifique desde Vault UI → Secret → pki/intermediate el certificado firmado.
 
 ![pki-intermediate-cert-signed.png](/images/pki-intermediate-cert-signed.png)
 
-Configuracion de la PKI para el app namespace:
+### PKI Intermediate por Namespace
 
-En este punto, es hora de configurar la PKI para namespace de la aplicación; para este ejemplo, configuramos el namespace team-one.  
+Configuracion de la PKI para el app demo:
+
+En este punto, es hora de configurar la PKI para namespace de la aplicación demo; para este ejemplo, configuramos el namespace team-one.  
 
 1. Cree "AuthEngineMount" para definir un [authentication engine endpoint]:
 ```sh
@@ -742,9 +731,9 @@ Verifique desde la interfaz de usuario de Vault → Secreto → app-pki/team-one
 ![app-pki-team-one.png](/images/app-pki-team-one.png)
 
 #
-## Implentacion de aplicacion de muestra
+## Implentacion de aplicacion Demo
 
-Para demostrar la funcionalidad de un extremo a otro, se puede implementar una aplicación de demostración basada en el web server apache con certificados proporcionados por cert-manager y la integración de Hashicorp Vault.
+Para demostrar la funcionalidad de un extremo a otro, se puede implementar una aplicación demo basada en el web server apache con certificados proporcionados por cert-manager y la integración de Hashicorp Vault.
 
 ![app-demo.png](/images/app-demo.png)
 
